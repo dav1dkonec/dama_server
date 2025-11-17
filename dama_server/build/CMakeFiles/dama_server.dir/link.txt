@@ -1,0 +1,1 @@
+/Library/Developer/CommandLineTools/usr/bin/c++  -arch arm64 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX14.4.sdk -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/dama_server.dir/src/main.cpp.o CMakeFiles/dama_server.dir/src/protocol.cpp.o CMakeFiles/dama_server.dir/src/handlers.cpp.o -o dama_server

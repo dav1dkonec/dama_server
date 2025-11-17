@@ -1,0 +1,3 @@
+/Users/konec/Documents/FAV/zimni_s_3/UPS/semestral/dama_server/build/CMakeFiles/dama_server.dir
+/Users/konec/Documents/FAV/zimni_s_3/UPS/semestral/dama_server/build/CMakeFiles/edit_cache.dir
+/Users/konec/Documents/FAV/zimni_s_3/UPS/semestral/dama_server/build/CMakeFiles/rebuild_cache.dir
