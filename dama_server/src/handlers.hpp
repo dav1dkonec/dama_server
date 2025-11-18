@@ -54,3 +54,13 @@ void handleJoinRoom(
     const sockaddr_in& clientAddr,
     socklen_t clientLen
 );
+
+void handleMove(
+    const Message& msg,
+    const std::string& clientKey,
+    RoomsMap& rooms,
+    const PlayersMap& players,
+    int sockfd,
+    const sockaddr_in& clientAddr,
+    socklen_t clientLen
+);

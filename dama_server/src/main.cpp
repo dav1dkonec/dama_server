@@ -88,6 +88,10 @@ int main() {
             handleJoinRoom(msg, clientKey, rooms, players,
                            sockfd, clientAddr, clientLen);
         }
+        else if (msg.type == "MOVE") {
+            handleMove(msg, clientKey, rooms, players,
+                        sockfd, clientAddr, clientLen);
+        }
         else {
             std::string resp = std::to_string(msg.id) +
                                ";ERROR;UNSUPPORTED_TYPE;Not implemented yet\n";
