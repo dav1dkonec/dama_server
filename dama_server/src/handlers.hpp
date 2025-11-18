@@ -7,10 +7,12 @@
 #include "models.hpp"
 
 // Pro zkrácení zápisu
+
 using PlayersMap = std::map<std::string, Player>; // clientKey -> Player
 using RoomsMap   = std::map<int, Room>;           // roomId   -> Room
 
 // Jednotlivé "handler" funkce
+
 void handleLogin(
     const Message& msg,
     const std::string& clientKey,
@@ -56,6 +58,16 @@ void handleJoinRoom(
 );
 
 void handleMove(
+    const Message& msg,
+    const std::string& clientKey,
+    RoomsMap& rooms,
+    const PlayersMap& players,
+    int sockfd,
+    const sockaddr_in& clientAddr,
+    socklen_t clientLen
+);
+
+void handleLeaveRoom(
     const Message& msg,
     const std::string& clientKey,
     RoomsMap& rooms,

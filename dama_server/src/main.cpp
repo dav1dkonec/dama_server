@@ -92,6 +92,10 @@ int main() {
             handleMove(msg, clientKey, rooms, players,
                         sockfd, clientAddr, clientLen);
         }
+        else if (msg.type == "LEAVE_ROOM") {
+            handleLeaveRoom(msg, clientKey, rooms, players,
+                            sockfd, clientAddr, clientLen);
+        }
         else {
             std::string resp = std::to_string(msg.id) +
                                ";ERROR;UNSUPPORTED_TYPE;Not implemented yet\n";

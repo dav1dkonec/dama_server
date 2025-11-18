@@ -438,3 +438,104 @@ void handleMove(
     // broadcast nové GAME_STATE všem hráčům v místnosti
     broadcastGameState(msg.id, room, players, sockfd);
 }
+
+// LEAVE_ROOM
+// Klient → server:  ID;LEAVE_ROOM;<roomId>
+// Server → klient:  ID;LEAVE_ROOM_OK;room=<roomId>
+// nebo:             ID;ERROR;ROOM_NOT_FOUND
+//                    ID;ERROR;NOT_LOGGED_IN
+//                    ID;ERROR;NOT_IN_ROOM
+// Pokud je v room ještě soupeř a hra byla IN_GAME:
+//    soupeř:        ID;GAME_END;room=<roomId>;reason=OPPONENT_LEFT
+void handleLeaveRoom(
+    const Message& msg,
+    const std::string& clientKey,
+    RoomsMap& rooms,
+    const PlayersMap& players,
+    int sockfd,
+    const sockaddr_in& clientAddr,
+    socklen_t clientLen
+) {
+    if (msg.rawParams.size() < 1) {
+        std::string resp = std::to_string(msg.id) +
+                            ";ERROR;INVALID_FORMAT;Missing roomId\n";
+        sendto(sockfd, resp.c_str(), resp.size(), 0,
+                reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+        return;
+    }
+
+    int roomId = std::stoi(msg.rawParams[0]);
+
+    auto itRoom = rooms.find(roomId);
+    if (itRoom == rooms.end()) {
+        std::string resp = std::to_string(msg.id) +
+            ";ERROR;ROOM_NOT_FOUND\n";
+        sendto(sockfd, resp.c_str(), resp.size(), 0,
+               reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+        return;
+    }
+
+    auto itPlayer = players.find(clientKey);
+    if (itPlayer == players.end()) {
+        std::string resp = std::to_string(msg.id) +
+            ";ERROR;NOT_LOGGED_IN\n";
+        sendto(sockfd, resp.c_str(), resp.size(), 0,
+                reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+        return;
+    }
+
+    Room& room = itRoom->second;
+
+    // najít hráče
+    auto itKey = std::find(room.Players.begin(), room.Players.end(), clientKey);
+    if (itKey == room.Players.end()) {
+        std::string resp = std::to_string(msg.id) +
+                          ";ERROR;NOT_IN_ROOM\n";
+        sendto(sockfd, resp.c_str(), resp.size(), 0,
+               reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+        return;
+    }
+
+    // odstraň hráče
+    room.Players.erase(itKey);
+
+    // potvrzení
+    std::string resp = std::to_string(msg.id) +
+                        ";LEAVE_ROOM_OK;room=" + std::to_string(roomId) + "\n";
+    sendto(sockfd, resp.c_str(), resp.size(), 0,
+            reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+
+    std::cout << "Player " << clientKey
+              << " left room " << room.id << std::endl;
+
+    // clean-up prázdné room
+
+    if (room.Players.empty()) {
+        room.status = RoomStatus::WAITING;
+        room.turn = Turn::NONE;
+        room.board.clear();
+        return;
+    }
+
+    // pokud zůstal hráč (druhý se najednou odpojil)
+    if (room.status == RoomStatus::IN_GAME) {
+        conts std::string& remainingKey = room.playerKeys[0];
+        auto pit = players.find(remainingKey);
+        if (pit != players.end()) {
+            const Player& player = pit->second;
+            sockaddr_in playerAddr = player.addr;
+            socklen_t playerLen = sizeof(playerAddr);
+
+            std::string endMsg = std::to_string(msg.id) +
+                                ";GAME_END;room=" + std::to_string(roomId) +
+                                ";reason=OPPONENt_LEFT\n";
+
+            sendto(sockfd, endMsg.c_str(), endMsg.size(), 0,
+                reinterpret_cast<const sockaddr*>(&playerAddr), playerLen);
+
+        }
+
+        room.status = RoomStatus::FINISHED;
+        room.turn = Turn::NONE;
+    }
+}
