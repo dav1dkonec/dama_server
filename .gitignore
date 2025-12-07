@@ -1,0 +1,71 @@
+# -------------------------
+#  OS SPECIFIC (macOS)
+# -------------------------
+.DS_Store
+
+# -------------------------
+#  IDE / EDITOR FILES
+# -------------------------
+.idea/
+.vscode/
+.vs/
+*.iml
+*.suo
+*.user
+*.userprefs
+*.rsuser
+
+# -------------------------
+#  CMake & Build folders
+# -------------------------
+build/
+*/build/
+cmake-build-debug/
+cmake-build-release/
+cmake-build*/
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+CMakeTmp/
+cmake_install.cmake
+CTestTestfile.cmake
+Makefile
+Makefile2
+rules.ninja
+*.ninja
+Testing/
+
+# -------------------------
+#  .NET build artifacts
+# -------------------------
+bin/
+obj/
+**/bin/
+**/obj/
+*.pdb
+*.cache
+
+# -------------------------
+#  Object & compiled files
+# -------------------------
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.out
+
+# -------------------------
+#  Logs
+# -------------------------
+*.log
+
+# -------------------------
+#  Backup files
+# -------------------------
+*~
+*.tmp
+*.swp
+*.swo
