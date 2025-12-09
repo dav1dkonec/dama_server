@@ -1,0 +1,121 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="clr-namespace:dama_klient_app.ViewModels"
+             xmlns:primitives="clr-namespace:Avalonia.Controls.Primitives;assembly=Avalonia.Controls"
+             x:Class="dama_klient_app.Views.GameView"
+             x:DataType="vm:GameViewModel">
+    <Grid RowDefinitions="Auto,*"
+          ColumnDefinitions="3*,2*">
+        <Border Grid.ColumnSpan="2"
+                Padding="0 0 0 4">
+            <StackPanel Orientation="Horizontal"
+                        Spacing="16"
+                        VerticalAlignment="Center">
+                <TextBlock Text="{Binding RoomName}"
+                           FontSize="20"
+                           FontWeight="SemiBold" />
+                <TextBlock Text="{Binding StatusMessage}"
+                           Foreground="Gray"
+                           VerticalAlignment="Center" />
+            </StackPanel>
+        </Border>
+
+        <Border Grid.Row="1"
+                Background="#f7f7f7"
+                CornerRadius="12"
+                Padding="8">
+            <ItemsControl ItemsSource="{Binding Cells}">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <primitives:UniformGrid Columns="{Binding BoardSize}"
+                                                Rows="{Binding BoardSize}" />
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate DataType="vm:BoardCellViewModel">
+                        <Border Background="{Binding Background}"
+                                CornerRadius="4"
+                                Margin="1"
+                                Padding="2">
+                            <Grid>
+                                <Ellipse Fill="{Binding Piece.Fill}"
+                                         Stroke="{Binding Piece.Stroke}"
+                                         StrokeThickness="2"
+                                         IsVisible="{Binding HasPiece}" />
+                                <TextBlock Text="K"
+                                           FontWeight="Bold"
+                                           Foreground="#d9b650"
+                                           FontSize="18"
+                                           HorizontalAlignment="Center"
+                                           VerticalAlignment="Center"
+                                           IsVisible="{Binding Piece.IsKing}" />
+                            </Grid>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+        </Border>
+
+        <Border Grid.Row="1"
+                Grid.Column="1"
+                Padding="12"
+                Background="#fdfdfd"
+                BorderBrush="#e6e6e6"
+                BorderThickness="1"
+                CornerRadius="12">
+            <StackPanel Spacing="12">
+                <TextBlock Text="Stav hry"
+                           FontSize="16"
+                           FontWeight="SemiBold" />
+
+                <StackPanel Orientation="Horizontal"
+                            Spacing="8"
+                            VerticalAlignment="Center">
+                    <Ellipse Width="12"
+                             Height="12"
+                             Fill="#2d2d2d"
+                             VerticalAlignment="Center" />
+                    <TextBlock Text="{Binding OpponentName}" />
+                    <TextBlock Text="{Binding OpponentTimer}"
+                               Foreground="Gray"
+                               Margin="6 0 0 0" />
+                </StackPanel>
+
+                <StackPanel Orientation="Horizontal"
+                            Spacing="8"
+                            VerticalAlignment="Center">
+                    <Ellipse Width="12"
+                             Height="12"
+                             Fill="#f8f8f8"
+                             Stroke="#d0d0d0"
+                             StrokeThickness="1"
+                             VerticalAlignment="Center" />
+                    <TextBlock Text="{Binding PlayerNickname}" />
+                    <TextBlock Text="{Binding PlayerTimer}"
+                               Foreground="Gray"
+                               Margin="6 0 0 0" />
+                    <TextBlock Text="(Vy)"
+                               Foreground="Gray"
+                               Margin="4 0 0 0" />
+                </StackPanel>
+
+                <TextBlock Text="Na tahu:"
+                           FontWeight="SemiBold" />
+                <TextBlock Text="{Binding CurrentTurnDisplay}"
+                           FontSize="14"
+                           Foreground="#0063b1" />
+
+                <Separator />
+
+                <TextBlock Text="Poznámky"
+                           FontWeight="SemiBold" />
+                <TextBlock Text="{Binding StatusMessage}"
+                           TextWrapping="Wrap" />
+
+                <Button Content="Opustit hru"
+                        Command="{Binding LeaveGameCommand}"
+                        HorizontalAlignment="Stretch" />
+            </StackPanel>
+        </Border>
+    </Grid>
+</UserControl>

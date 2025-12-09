@@ -1,0 +1,75 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="clr-namespace:dama_klient_app.ViewModels"
+             x:Class="dama_klient_app.Views.LobbyView"
+             x:DataType="vm:LobbyViewModel">
+    <DockPanel>
+        <StackPanel Orientation="Horizontal"
+                    DockPanel.Dock="Top"
+                    Margin="0 0 0 12"
+                    VerticalAlignment="Center"
+                    Spacing="8">
+            <TextBlock Text="{Binding Nickname}"
+                       FontWeight="SemiBold"
+                       VerticalAlignment="Center" />
+            <TextBlock Text="v lobby"
+                       Foreground="Gray"
+                       VerticalAlignment="Center" />
+            <StackPanel Orientation="Horizontal"
+                        HorizontalAlignment="Right"
+                        Spacing="8">
+                <Button Content="Obnovit"
+                        Command="{Binding RefreshCommand}" />
+                <Button Content="Vytvořit stůl"
+                        Command="{Binding CreateRoomCommand}" />
+                <Button Content="Odhlásit"
+                        Command="{Binding LogoutCommand}" />
+            </StackPanel>
+        </StackPanel>
+
+        <Grid RowDefinitions="Auto,*"
+              ColumnDefinitions="*">
+            <TextBlock Text="{Binding StatusMessage}"
+                       Foreground="Gray"
+                       Margin="0 0 0 8" />
+            <Border Grid.Row="1"
+                    BorderBrush="#DDD"
+                    BorderThickness="1"
+                    CornerRadius="8"
+                    Padding="8">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="3*" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+
+                    <DataGrid ItemsSource="{Binding Rooms}"
+                              SelectedItem="{Binding SelectedRoom, Mode=TwoWay}"
+                              AutoGenerateColumns="False"
+                              CanUserResizeColumns="True"
+                              GridLinesVisibility="Horizontal"
+                              IsReadOnly="True">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="Název"
+                                                Binding="{Binding Name}" />
+                            <DataGridTextColumn Header="Hráči"
+                                                Binding="{Binding PlayerCount}" />
+                            <DataGridTextColumn Header="Kapacita"
+                                                Binding="{Binding Capacity}" />
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <StackPanel Grid.Column="1"
+                                Margin="12 0 0 0"
+                                Spacing="8">
+                        <Button Content="Připojit"
+                                Command="{Binding JoinRoomCommand}" />
+                        <TextBlock Text="Vyberte stůl a připojte se."
+                                   TextWrapping="Wrap"
+                                   Foreground="Gray" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+        </Grid>
+    </DockPanel>
+</UserControl>

@@ -1,0 +1,33 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="clr-namespace:dama_klient_app.ViewModels"
+             x:Class="dama_klient_app.Views.LoginView"
+             x:DataType="vm:LoginViewModel">
+    <Grid RowDefinitions="Auto,*" ColumnDefinitions="*">
+        <StackPanel HorizontalAlignment="Center"
+                    VerticalAlignment="Center"
+                    Width="360"
+                    Spacing="12">
+            <TextBlock Text="Přihlášení"
+                       FontSize="24"
+                       FontWeight="SemiBold"
+                       HorizontalAlignment="Center" />
+            <TextBlock Text="Zadejte přezdívku pro lobby."
+                       Foreground="Gray"
+                       HorizontalAlignment="Center" />
+
+            <TextBox Watermark="Přezdívka"
+                     Text="{Binding Nickname, Mode=TwoWay}"
+                     IsEnabled="{Binding !IsBusy}" />
+
+            <Button Content="Připojit"
+                    Command="{Binding ConnectCommand}"
+                    HorizontalAlignment="Stretch" />
+
+            <TextBlock Text="{Binding ErrorMessage}"
+                       Foreground="DarkRed"
+                       TextWrapping="Wrap"
+                       IsVisible="{Binding HasError}" />
+        </StackPanel>
+    </Grid>
+</UserControl>

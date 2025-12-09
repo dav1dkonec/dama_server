@@ -39,5 +39,6 @@ Messages end with `\n`, format `ID;TYPE;param;key=value;...`.
 - Join: `4;JOIN_ROOM;1` → `4;JOIN_ROOM_OK;room=1;players=1/2`
 - Start: `4;GAME_START;room=1;you=WHITE`, `4;GAME_STATE;room=1;turn=PLAYER1;board=...`
 - Move: `5;MOVE;1;5;0;4;1` → if valid: `5;GAME_STATE;room=1;turn=PLAYER2;board=...`
+- Legal moves: `6;LEGAL_MOVES;1;5;0` → `6;LEGAL_MOVES;room=1;from=5,0;to=4,1;mustCapture=0`
 - Leave: `6;LEAVE_ROOM;1` → `6;LEAVE_ROOM_OK;room=1`
-- End: `0;GAME_END;room=1;reason=OPPONENT_TIMEOUT`
+- End: `0;GAME_END;room=1;reason=OPPONENT_TIMEOUT;winner=BLACK`
