@@ -4,6 +4,7 @@
 #include <string>
 #include <chrono>
 #include <thread>
+#include <algorithm>
 
 #include <sys/types.h>
 #include <sys/socket.h>
