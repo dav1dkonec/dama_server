@@ -1,0 +1,17 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:vm="clr-namespace:dama_klient_app.ViewModels"
+        mc:Ignorable="d"
+        d:DesignWidth="1024"
+        d:DesignHeight="720"
+        x:Class="dama_klient_app.MainWindow"
+        x:DataType="vm:MainWindowViewModel"
+        Title="Checkers Client"
+        Width="1024"
+        Height="720">
+    <Border Padding="16">
+        <ContentControl Content="{Binding CurrentViewModel}" />
+    </Border>
+</Window>
