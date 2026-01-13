@@ -428,7 +428,7 @@ int main(int argc, char* argv[]) {
                 if (room.status != RoomStatus::IN_GAME) continue;
 
                 bool allReady = true;
-                long long resumeByEpochMs = 0;
+                std::chrono::milliseconds::rep resumeByEpochMs = 0;
                 for (const auto& pKey : room.playerKeys) {
                     auto pit = players.find(pKey);
                     if (pit == players.end()) {
