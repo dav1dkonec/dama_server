@@ -1,10 +1,13 @@
 using System;
 using System.Collections.ObjectModel;
 using System.Linq;
+using System.Net;
+using System.Net.NetworkInformation;
 using System.Threading.Tasks;
 using System.Windows.Input;
 using System.Timers;
 using Avalonia.Threading;
+using Avalonia.Media;
 using dama_klient_app.Models;
 using dama_klient_app.Services;
 
@@ -18,6 +21,7 @@ public class GameViewModel : ViewModelBase
 {
     // Identifikace místnosti a návratová akce do lobby.
     private readonly Action _returnToLobby;
+    private readonly Action<string?> _returnToLogin;
     private readonly int _roomId;
 
     // Příznak, že deska už byla načtena (pro změnu textu na tahu).
@@ -29,10 +33,12 @@ public class GameViewModel : ViewModelBase
     private string _playerColor;
     private string _opponentName = "Soupeř";
     private string _currentTurn = "NONE";
-    private string _currentTurnDisplay = "Čekám na data";
+    private string _currentTurnDisplay = "Čekám na soupeře";
     private string _statusMessage = "Čekám na start hry...";
     private string _playerTimer = "60s";
     private string _opponentTimer = "60s";
+    private string _serverStatusText = "Server neznámý";
+    private IBrush _serverStatusBrush = Brushes.Gray;
 
     private BoardCellViewModel? _selectedCell;
     private LegalMovesResult? _lastLegalMoves;
@@ -47,6 +53,8 @@ public class GameViewModel : ViewModelBase
     private bool _awaitingReconnect;
     private DispatcherTimer? _reconnectTimer;
     private bool _showingPause;
+    private bool _serverOutage;
+    private long _serverOutageByMs;
     private string? _lastBoard;
     private BoardCellViewModel[] _cellsByServer = Array.Empty<BoardCellViewModel>();
     private bool _boardBuilt;
@@ -56,11 +64,15 @@ public class GameViewModel : ViewModelBase
     private bool _isFinished;
     private bool _isMyClockActive;
     private bool _isOpponentClockActive;
+    private bool _showPauseOverlay;
+    private readonly TimeSpan _reconnectWindow = TimeSpan.FromSeconds(60);
+    private bool _localDisconnect;
 
-    public GameViewModel(IGameClient gameClient, RoomInfo room, string playerNickname, Action returnToLobby)
+    public GameViewModel(IGameClient gameClient, RoomInfo room, string playerNickname, Action returnToLobby, Action<string?> returnToLogin)
     {
         GameClient = gameClient;
         _returnToLobby = returnToLobby;
+        _returnToLogin = returnToLogin;
         _roomId = int.TryParse(room.Id, out var rid) ? rid : 0;
         _roomName = room.Name;
         _playerColor = "NEZNÁMÁ";
@@ -78,6 +90,9 @@ public class GameViewModel : ViewModelBase
         GameClient.GameEnded += OnGameEnded;
         GameClient.Disconnected += OnDisconnected;
         GameClient.GamePaused += OnGamePaused;
+        GameClient.TokenInvalidated += OnTokenInvalidated;
+        GameClient.ServerStatusChanged += OnServerStatusChanged;
+        UpdateServerStatus(GameClient.ServerStatus);
         _ = GameClient.TryReconnectAsync();
 
         // build default grid on UI thread; will rebuild with flip after GAME_START
@@ -156,6 +171,14 @@ public class GameViewModel : ViewModelBase
         set => SetField(ref _isOpponentClockActive, value);
     }
 
+    public bool IsBoardEnabled => !_isPaused;
+
+    public bool ShowPauseOverlay
+    {
+        get => _showPauseOverlay;
+        set => SetField(ref _showPauseOverlay, value);
+    }
+
     public string CurrentTurn
     {
         get => _currentTurn;
@@ -184,6 +207,18 @@ public class GameViewModel : ViewModelBase
     {
         get => _opponentTimer;
         set => SetField(ref _opponentTimer, value);
+    }
+
+    public string ServerStatusText
+    {
+        get => _serverStatusText;
+        private set => SetField(ref _serverStatusText, value);
+    }
+
+    public IBrush ServerStatusBrush
+    {
+        get => _serverStatusBrush;
+        private set => SetField(ref _serverStatusBrush, value);
     }
 
     public ICommand RequestLeaveCommand { get; }
@@ -362,12 +397,16 @@ public class GameViewModel : ViewModelBase
             }
             ApplyBoard(info.Board);
             ClearSelection();
-            _isPaused = false;
+            SetPaused(false);
+            _serverOutage = false;
+            _serverOutageByMs = 0;
             _resumeByMs = 0;
+            _localDisconnect = false;
             _awaitingReconnect = false;
             _showingPause = false;
             StopReconnectLoop();
             _timeExpired = false;
+            ShowPauseOverlay = false;
             if (!_lastMoveTarget.HasValue)
             {
                 _awaitingCaptureChain = false;
@@ -416,10 +455,6 @@ public class GameViewModel : ViewModelBase
                 }
             }
             AppServices.Logger.Info($"GAME_STATE room={info.RoomId} turn={info.Turn} pieces={Cells.Count(c => c.HasPiece)}");
-            if (myTurn && _lastMoveTarget.HasValue)
-            {
-                _ = ContinueCaptureAsync(_lastMoveTarget.Value);
-            }
         });
     }
 
@@ -435,7 +470,7 @@ public class GameViewModel : ViewModelBase
         CurrentTurnDisplay = "Ukončeno";
         ClearSelection();
         StopTurnTimer();
-        _isPaused = false;
+        SetPaused(false);
         _resumeByMs = 0;
         _showingPause = false;
         _awaitingCaptureChain = false;
@@ -443,7 +478,25 @@ public class GameViewModel : ViewModelBase
         StopReconnectLoop();
         Unsubscribe();
         _isFinished = true;
+        _serverOutage = false;
+        _serverOutageByMs = 0;
+        _localDisconnect = false;
         AppServices.Logger.Info($"GAME_END room={info.RoomId} reason={info.Reason} winner={info.Winner}");
+
+        var reason = info.Reason?.ToUpperInvariant() ?? string.Empty;
+        var winner = info.Winner?.ToUpperInvariant() ?? "NONE";
+        if (reason == "OPPONENT_TIMEOUT" && !winner.Equals(PlayerColor, StringComparison.OrdinalIgnoreCase))
+        {
+            await ReturnToLoginAsync();
+            return;
+        }
+
+        // pokud v reconnect flow, klient se pošle rovnou na login
+        if (_awaitingReconnect)
+        {
+            await ReturnToLoginAsync();
+            return;
+        }
 
         // necháme vítězi krátký čas na zobrazení výsledku
         await Task.Delay(TimeSpan.FromSeconds(3));
@@ -607,13 +660,120 @@ public class GameViewModel : ViewModelBase
     {
         Dispatcher.UIThread.Post(() =>
         {
-            StatusMessage = "Spojení se serverem bylo ztraceno.";
-            _isPaused = true;
-            _showingPause = false;
-            _awaitingReconnect = true;
-            StopTurnTimer();
+            HandleConnectivityLoss();
         });
+    }
+
+    private void OnServerStatusChanged(object? sender, ServerStatus status)
+    {
+        Dispatcher.UIThread.Post(() => HandleServerStatus(status));
+    }
+
+    private void OnTokenInvalidated(object? sender, EventArgs e)
+    {
+        if (!Dispatcher.UIThread.CheckAccess())
+        {
+            Dispatcher.UIThread.Post(() => OnTokenInvalidated(sender, e));
+            return;
+        }
+
+        _isFinished = true;
+        StopTurnTimer();
+        StopReconnectLoop();
+        SetPaused(false);
+        _ = ReturnToLoginAsync();
+    }
+
+    private void HandleServerStatus(ServerStatus status)
+    {
+        UpdateServerStatus(status);
+        if (status == ServerStatus.Offline)
+        {
+            HandleConnectivityLoss();
+        }
+        else if (status == ServerStatus.Online)
+        {
+            HandleServerOnline();
+        }
+    }
+
+    private void HandleServerOffline()
+    {
+        if (_isFinished || _serverOutage)
+        {
+            return;
+        }
+
+        _localDisconnect = false;
+        _serverOutage = true;
+        _serverOutageByMs = DateTimeOffset.UtcNow.AddSeconds(20).ToUnixTimeMilliseconds();
+        StatusMessage = "Spojení se serverem bylo přerušeno, čekám na obnovení...";
+        SetPaused(true);
+        _showingPause = false;
+        _awaitingReconnect = true;
+        StopTurnTimer();
+        IsMyClockActive = false;
+        IsOpponentClockActive = false;
+        CurrentTurnDisplay = "Přerušeno";
+        ShowPauseOverlay = true;
         StartReconnectLoop();
+    }
+
+    private void HandleLocalNetworkLoss()
+    {
+        if (_isFinished || _localDisconnect)
+        {
+            return;
+        }
+
+        _localDisconnect = true;
+        _serverOutage = false;
+        _serverOutageByMs = 0;
+        _resumeByMs = DateTimeOffset.UtcNow.Add(_reconnectWindow).ToUnixTimeMilliseconds();
+        StatusMessage = "Ztracené spojení. Obnovuji připojení...";
+        SetPaused(true);
+        _showingPause = false;
+        _awaitingReconnect = true;
+        StopTurnTimer();
+        IsMyClockActive = false;
+        IsOpponentClockActive = false;
+        CurrentTurnDisplay = "Přerušeno";
+        ShowPauseOverlay = true;
+        StartReconnectLoop();
+    }
+
+    private void HandleServerOnline()
+    {
+        if (!_serverOutage || _isFinished)
+        {
+            return;
+        }
+
+        _serverOutage = false;
+        _serverOutageByMs = 0;
+        StatusMessage = "Obnovuji spojení se serverem...";
+        _awaitingReconnect = true;
+        StartReconnectLoop();
+        _ = GameClient.TryReconnectAsync();
+    }
+
+    private void UpdateServerStatus(ServerStatus status)
+    {
+        switch (status)
+        {
+            case ServerStatus.Online:
+                ServerStatusText = "Server online";
+                ServerStatusBrush = Brushes.ForestGreen;
+                break;
+            case ServerStatus.Offline:
+                ServerStatusText = "Spojení přerušeno";
+                ServerStatusBrush = Brushes.IndianRed;
+                break;
+            default:
+                ServerStatusText = "Server neznámý";
+                ServerStatusBrush = Brushes.Gray;
+                break;
+        }
     }
 
     private void OnGamePaused(object? sender, (int RoomId, long ResumeBy) payload)
@@ -625,13 +785,22 @@ public class GameViewModel : ViewModelBase
 
         Dispatcher.UIThread.Post(() =>
         {
-            _isPaused = true;
-            _resumeByMs = payload.ResumeBy;
+            SetPaused(true);
+            if (!_showingPause || _resumeByMs == 0)
+            {
+                _resumeByMs = payload.ResumeBy;
+            }
             StopTurnTimer();
+            IsMyClockActive = false;
+            IsOpponentClockActive = false;
             StatusMessage = "Soupeř odpojen, čekám na návrat...";
             CurrentTurnDisplay = "Přerušeno";
-            _awaitingReconnect = true;
+            _awaitingReconnect = false;
             _showingPause = true;
+            _serverOutage = false;
+            _serverOutageByMs = 0;
+            _localDisconnect = false;
+            ShowPauseOverlay = true;
         });
         StartReconnectLoop();
     }
@@ -666,14 +835,14 @@ public class GameViewModel : ViewModelBase
         if (_awaitingCaptureChain && _lastMoveTarget.HasValue)
         {
             var (r, c) = _lastMoveTarget.Value;
-            if (cell.HasPiece && (cell.Row != r || cell.Col != c))
+            if (cell.HasPiece && (cell.ServerRow != r || cell.ServerCol != c))
             {
                 StatusMessage = "Pokračuj v braní tou samou figurkou.";
                 return;
             }
 
             // pokud není vybraná figurka (např. po novém GAME_STATE), znovu načte tahy pro zámek
-            if ((_selectedCell == null || _lastLegalMoves == null) && cell.Row == r && cell.Col == c && cell.Piece != null)
+            if ((_selectedCell == null || _lastLegalMoves == null) && cell.ServerRow == r && cell.ServerCol == c && cell.Piece != null)
             {
                 await FetchLegalMovesAsync(cell);
             }
@@ -746,6 +915,11 @@ public class GameViewModel : ViewModelBase
         }
         catch (Exception ex)
         {
+            if (ex is TimeoutException || ex.Message.Contains("No response", StringComparison.OrdinalIgnoreCase))
+            {
+                HandleLocalDisconnect();
+                return;
+            }
             StatusMessage = $"Načtení tahů selhalo: {ex.Message}";
             ClearSelection();
             AppServices.Logger.Error($"LEGAL_MOVES failed: {ex.Message}");
@@ -773,6 +947,7 @@ public class GameViewModel : ViewModelBase
             return;
         }
 
+        var moveSucceeded = false;
         try
         {
             _isBusy = true;
@@ -783,18 +958,25 @@ public class GameViewModel : ViewModelBase
 
             StatusMessage = "Tah odeslán.";
             AppServices.Logger.Info($"MOVE room={_roomId} from={selected.Row},{selected.Col} to={target.Row},{target.Col}");
-            _lastMoveTarget = (target.ServerRow, target.ServerCol);
-            _awaitingCaptureChain = true;
+            moveSucceeded = true;
         }
         catch (Exception ex)
         {
+            if (ex is TimeoutException || ex.Message.Contains("No response", StringComparison.OrdinalIgnoreCase))
+            {
+                HandleLocalDisconnect();
+                return;
+            }
             StatusMessage = $"Tah selhal: {ex.Message}";
             AppServices.Logger.Error($"Move failed: {ex.Message}");
         }
         finally
         {
             _isBusy = false;
-            ClearSelection();
+            if (!moveSucceeded)
+            {
+                ClearSelection();
+            }
         }
     }
 
@@ -817,7 +999,6 @@ public class GameViewModel : ViewModelBase
 
     private void StartReconnectLoop()
     {
-        _awaitingReconnect = true;
         if (_reconnectTimer == null)
         {
             _reconnectTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
@@ -827,12 +1008,29 @@ public class GameViewModel : ViewModelBase
         {
             _reconnectTimer.Start();
         }
-        _ = GameClient.TryReconnectAsync();
+        if (_awaitingReconnect)
+        {
+            _ = GameClient.TryReconnectAsync();
+        }
     }
 
     private void OnReconnectTick(object? sender, EventArgs e)
     {
-        if (_resumeByMs > 0)
+        if (_serverOutage)
+        {
+            var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var remainingMs = _serverOutageByMs - nowMs;
+            var seconds = Math.Max(0, (int)Math.Ceiling(remainingMs / 1000.0));
+            StatusMessage = remainingMs > 0
+                ? $"Spojení se serverem přerušeno, čekám {seconds}s..."
+                : "Spojení se serverem je stále přerušeno.";
+            if (remainingMs <= 0 && !_isFinished)
+            {
+                _isFinished = true;
+                _ = ReturnToLoginAsync("Spojení se serverem bylo přerušeno, byli jste odhlášeni.");
+            }
+        }
+        else if (_resumeByMs > 0)
         {
             var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             var remainingMs = _resumeByMs - nowMs;
@@ -842,10 +1040,39 @@ public class GameViewModel : ViewModelBase
                 StatusMessage = remainingMs > 0
                     ? $"Soupeř odpojen, čekám {seconds}s..."
                     : "Čekám na odpověď serveru...";
+                if (remainingMs <= 0 && !_isFinished)
+                {
+                    _ = EndWaitingAfterTimeoutAsync();
+                }
+            }
+            else if (_awaitingReconnect)
+            {
+                StatusMessage = remainingMs > 0
+                    ? "Ztracené spojení. Obnovuji připojení..."
+                    : "Spojení se nepodařilo obnovit.";
+                if (remainingMs <= 0 && !_isFinished)
+                {
+                    _isFinished = true;
+                    _ = ReturnToLoginAsync();
+                }
             }
         }
 
-        _ = GameClient.TryReconnectAsync();
+        if (_awaitingReconnect)
+        {
+            _ = GameClient.TryReconnectAsync();
+        }
+    }
+
+    private void SetPaused(bool paused)
+    {
+        if (_isPaused == paused)
+        {
+            return;
+        }
+
+        _isPaused = paused;
+        OnPropertyChanged(nameof(IsBoardEnabled));
     }
 
     private void StopReconnectLoop()
@@ -858,6 +1085,99 @@ public class GameViewModel : ViewModelBase
         _resumeByMs = 0;
     }
 
+    private void HandleLocalDisconnect()
+    {
+        if (!Dispatcher.UIThread.CheckAccess())
+        {
+            Dispatcher.UIThread.Post(HandleLocalDisconnect);
+            return;
+        }
+
+        HandleConnectivityLoss();
+    }
+
+    private void HandleConnectivityLoss()
+    {
+        if (!IsNetworkLikelyAvailable())
+        {
+            HandleLocalNetworkLoss();
+            return;
+        }
+
+        HandleServerOffline();
+    }
+
+    private static bool IsNetworkLikelyAvailable()
+    {
+        try
+        {
+            if (!NetworkInterface.GetIsNetworkAvailable())
+            {
+                return false;
+            }
+
+            foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
+            {
+                if (nic.OperationalStatus != OperationalStatus.Up)
+                {
+                    continue;
+                }
+                if (nic.NetworkInterfaceType == NetworkInterfaceType.Loopback ||
+                    nic.NetworkInterfaceType == NetworkInterfaceType.Tunnel ||
+                    nic.NetworkInterfaceType == NetworkInterfaceType.Unknown)
+                {
+                    continue;
+                }
+
+                var props = nic.GetIPProperties();
+                if (props.GatewayAddresses.Count == 0)
+                {
+                    continue;
+                }
+
+                var hasUsableAddress = props.UnicastAddresses.Any(addr =>
+                    !IPAddress.IsLoopback(addr.Address) &&
+                    !addr.Address.IsIPv6LinkLocal &&
+                    !addr.Address.ToString().StartsWith("169.254.", StringComparison.Ordinal));
+
+                if (hasUsableAddress)
+                {
+                    return true;
+                }
+            }
+        }
+        catch
+        {
+            // If we cannot inspect interfaces, fall back to "available".
+            return true;
+        }
+
+        return false;
+    }
+
+    private async Task ReturnToLoginAsync(string? reason = null)
+    {
+        await Task.Delay(TimeSpan.FromSeconds(2));
+        _returnToLogin(reason);
+    }
+
+    private async Task EndWaitingAfterTimeoutAsync()
+    {
+        if (_isFinished)
+        {
+            return;
+        }
+
+        _isFinished = true;
+        StatusMessage = "Soupeř se nevrátil, vyhráváš.";
+        CurrentTurnDisplay = "Ukončeno";
+        StopTurnTimer();
+        StopReconnectLoop();
+        Unsubscribe();
+        await Task.Delay(TimeSpan.FromSeconds(2));
+        _returnToLobby();
+    }
+
     // Odhlášení z eventů klienta (prevence leaků a double-notifikací).
     private void Unsubscribe()
     {
@@ -866,6 +1186,8 @@ public class GameViewModel : ViewModelBase
         GameClient.GameEnded -= OnGameEnded;
         GameClient.Disconnected -= OnDisconnected;
         GameClient.GamePaused -= OnGamePaused;
+        GameClient.TokenInvalidated -= OnTokenInvalidated;
+        GameClient.ServerStatusChanged -= OnServerStatusChanged;
         StopTurnTimer();
         StopReconnectLoop();
     }

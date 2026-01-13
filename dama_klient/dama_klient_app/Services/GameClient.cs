@@ -21,7 +21,12 @@ public class GameClient : IGameClient, IAsyncDisposable
     private int _port;
     private readonly TimeSpan _requestTimeout = TimeSpan.FromSeconds(5);
     private readonly TimeSpan _roomsCollectWindow = TimeSpan.FromMilliseconds(150);
-    private readonly TimeSpan _heartbeatInterval = TimeSpan.FromSeconds(10);
+    private readonly TimeSpan _heartbeatInterval = TimeSpan.FromSeconds(5);
+    private readonly TimeSpan _disconnectThreshold = TimeSpan.FromSeconds(20);
+    private readonly TimeSpan _invalidWindow = TimeSpan.FromSeconds(30);
+    private readonly TimeSpan _phaseGraceWindow = TimeSpan.FromSeconds(3);
+    private readonly TimeSpan _resyncCooldown = TimeSpan.FromSeconds(3);
+    private readonly TimeSpan _serverOfflineThreshold = TimeSpan.FromSeconds(12);
 
     // UDP socket a tabulka rozpracovaných požadavků (dle ID).
     private readonly UdpClient _udpClient;
@@ -42,6 +47,15 @@ public class GameClient : IGameClient, IAsyncDisposable
     private string _token = string.Empty;
     private readonly object _reconnectLock = new();
     private bool _reconnecting;
+    private DateTimeOffset _lastReceiveAt = DateTimeOffset.UtcNow;
+    private int _disconnectNotified;
+    private int _invalidServerCount;
+    private DateTimeOffset _invalidWindowStart;
+    private DateTimeOffset _lastResyncRequest;
+    private ClientPhase _phase = ClientPhase.LoggedOut;
+    private int? _activeRoomId;
+    private DateTimeOffset _phaseChangedAt = DateTimeOffset.UtcNow;
+    private ServerStatus _serverStatus = ServerStatus.Unknown;
 
     public GameClient(string host = "127.0.0.1", int port = 5000)
     {
@@ -64,8 +78,11 @@ public class GameClient : IGameClient, IAsyncDisposable
     public bool IsConnected => _isConnected;
     public int TurnTimeoutMs => _turnTimeoutMs;
     public string Token => _token;
+    public ServerStatus ServerStatus => _serverStatus;
 
     public event EventHandler? Disconnected;
+    public event EventHandler<ServerStatus>? ServerStatusChanged;
+    public event EventHandler? TokenInvalidated;
     public event EventHandler<IReadOnlyList<RoomInfo>>? LobbyUpdated;
     public event EventHandler<GameStartInfo>? GameStarted;
     public event EventHandler<GameStateInfo>? GameStateUpdated;
@@ -89,6 +106,8 @@ public class GameClient : IGameClient, IAsyncDisposable
         }
 
         _udpClient.Connect(_host, _port);
+        _lastReceiveAt = DateTimeOffset.UtcNow;
+        _disconnectNotified = 0;
         _receiveLoopTask = Task.Run(() => ReceiveLoopAsync(_cts.Token));
         _heartbeatTask = Task.Run(() => HeartbeatLoopAsync(_cts.Token));
         await Task.CompletedTask;
@@ -110,8 +129,22 @@ public class GameClient : IGameClient, IAsyncDisposable
         try
         {
             var id = NextId();
+            var pending = new PendingRequest(RequestKind.Single, new[] { "RECONNECT_OK", "ERROR" });
+            _pending[id] = pending;
             var payload = $"{id};RECONNECT;{_token}\n";
             await SendAsync(payload, cancellationToken);
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await Task.Delay(_requestTimeout, _cts.Token);
+                }
+                catch (TaskCanceledException)
+                {
+                    // shutdown
+                }
+                _pending.TryRemove(id, out _);
+            }, _cts.Token);
         }
         finally
         {
@@ -126,7 +159,7 @@ public class GameClient : IGameClient, IAsyncDisposable
     {
         // LOGIN → čekáme na LOGIN_OK nebo ERROR.
         var id = NextId();
-        var pending = new PendingRequest(RequestKind.Single);
+        var pending = new PendingRequest(RequestKind.Single, new[] { "LOGIN_OK", "ERROR" });
         _pending[id] = pending;
         await SendAsync($"{id};LOGIN;{nickname}\n", cancellationToken);
         var resp = await AwaitResponseAsync(id, pending, cancellationToken);
@@ -136,7 +169,9 @@ public class GameClient : IGameClient, IAsyncDisposable
         }
         if (resp.Params.TryGetValue("token", out var tkn))
         {
+            ClearSessionCaches();
             _token = tkn;
+            SetPhase(ClientPhase.Lobby);
         }
     }
 
@@ -151,13 +186,16 @@ public class GameClient : IGameClient, IAsyncDisposable
         {
             // best-effort
         }
+        _token = string.Empty;
+        ClearSessionCaches();
+        SetPhase(ClientPhase.LoggedOut);
     }
 
     public async Task<IReadOnlyList<RoomInfo>> GetRoomsAsync(CancellationToken cancellationToken = default)
     {
         // LIST_ROOMS → sbíráme ROOM/ROOMS_EMPTY v krátkém okně, pak vracíme snapshot.
         var id = NextId();
-        var pending = new PendingRequest(RequestKind.Rooms);
+        var pending = new PendingRequest(RequestKind.Rooms, new[] { "ROOM", "ROOMS_EMPTY", "ERROR" });
         _pending[id] = pending;
         await SendAsync($"{id};LIST_ROOMS\n", cancellationToken);
         var rooms = await pending.RoomsTask(_roomsCollectWindow, cancellationToken);
@@ -170,7 +208,7 @@ public class GameClient : IGameClient, IAsyncDisposable
     {
         // CREATE_ROOM → čeká na CREATE_ROOM_OK nebo ERROR.
         var id = NextId();
-        var pending = new PendingRequest(RequestKind.Single);
+        var pending = new PendingRequest(RequestKind.Single, new[] { "CREATE_ROOM_OK", "ERROR" });
         _pending[id] = pending;
         await SendAsync($"{id};CREATE_ROOM;{name}\n", cancellationToken);
         var resp = await AwaitResponseAsync(id, pending, cancellationToken);
@@ -188,14 +226,31 @@ public class GameClient : IGameClient, IAsyncDisposable
     public async Task JoinRoomAsync(string roomId, CancellationToken cancellationToken = default)
     {
         // JOIN_ROOM → čeká na JOIN_ROOM_OK nebo ERROR (GAME_START a GAME_STATE přijdou jako push).
-        var id = NextId();
-        var pending = new PendingRequest(RequestKind.Single);
-        _pending[id] = pending;
-        await SendAsync($"{id};JOIN_ROOM;{roomId}\n", cancellationToken);
-        var resp = await AwaitResponseAsync(id, pending, cancellationToken);
-        if (resp.Type == "ERROR")
+        var parsedRoomId = TryParseRoomId(roomId);
+        SetPhase(ClientPhase.InRoom, parsedRoomId);
+        try
         {
-            throw new InvalidOperationException(resp.Raw);
+            var id = NextId();
+            var pending = new PendingRequest(RequestKind.Single, new[] { "JOIN_ROOM_OK", "ERROR" });
+            _pending[id] = pending;
+            await SendAsync($"{id};JOIN_ROOM;{roomId}\n", cancellationToken);
+            var resp = await AwaitResponseAsync(id, pending, cancellationToken);
+            if (resp.Type == "ERROR")
+            {
+                if (_phase == ClientPhase.InRoom && (!_activeRoomId.HasValue || _activeRoomId == parsedRoomId))
+                {
+                    SetPhase(ClientPhase.Lobby);
+                }
+                throw new InvalidOperationException(resp.Raw);
+            }
+        }
+        catch
+        {
+            if (_phase == ClientPhase.InRoom && (!_activeRoomId.HasValue || _activeRoomId == parsedRoomId))
+            {
+                SetPhase(ClientPhase.Lobby);
+            }
+            throw;
         }
     }
 
@@ -203,7 +258,7 @@ public class GameClient : IGameClient, IAsyncDisposable
     {
         // LEAVE_ROOM → potvrzení LEAVE_ROOM_OK, případné GAME_END přijde jako push soupeři.
         var id = NextId();
-        var pending = new PendingRequest(RequestKind.Single);
+        var pending = new PendingRequest(RequestKind.Single, new[] { "LEAVE_ROOM_OK", "ERROR" });
         _pending[id] = pending;
         await SendAsync($"{id};LEAVE_ROOM;{roomId}\n", cancellationToken);
         var resp = await AwaitResponseAsync(id, pending, cancellationToken);
@@ -211,13 +266,17 @@ public class GameClient : IGameClient, IAsyncDisposable
         {
             throw new InvalidOperationException(resp.Raw);
         }
+        if (!_activeRoomId.HasValue || _activeRoomId == roomId)
+        {
+            SetPhase(ClientPhase.Lobby);
+        }
     }
 
     public async Task SendMoveAsync(Move move, CancellationToken cancellationToken = default)
     {
         // MOVE → server odpoví ERROR nebo pošle GAME_STATE/GAME_END push všem v místnosti; držíme pending kvůli případnému ERROR.
         var id = NextId();
-        var pending = new PendingRequest(RequestKind.Single);
+        var pending = new PendingRequest(RequestKind.Single, new[] { "GAME_STATE", "GAME_END", "ERROR" });
         _pending[id] = pending;
         var payload = $"{id};MOVE;{move.RoomId};{move.From.Row};{move.From.Col};{move.To.Row};{move.To.Col}\n";
         await SendAsync(payload, cancellationToken);
@@ -232,7 +291,7 @@ public class GameClient : IGameClient, IAsyncDisposable
     {
         // LEGAL_MOVES → odpověď LEGAL_MOVES nebo ERROR, obsahuje seznam cílových polí a mustCapture.
         var id = NextId();
-        var pending = new PendingRequest(RequestKind.Single);
+        var pending = new PendingRequest(RequestKind.Single, new[] { "LEGAL_MOVES", "ERROR" });
         _pending[id] = pending;
         await SendAsync($"{id};LEGAL_MOVES;{roomId};{row};{col}\n", cancellationToken);
         var resp = await AwaitResponseAsync(id, pending, cancellationToken);
@@ -241,14 +300,25 @@ public class GameClient : IGameClient, IAsyncDisposable
             throw new InvalidOperationException(resp.Raw);
         }
 
-        var from = ParseCoords(resp.Params.TryGetValue("from", out var fromStr) ? fromStr : $"{row},{col}");
+        var fromValue = resp.Params.TryGetValue("from", out var fromStr) ? fromStr : $"{row},{col}";
+        if (!TryParseCoords(fromValue, out var fromRow, out var fromCol))
+        {
+            fromRow = 0;
+            fromCol = 0;
+        }
+        var from = (fromRow, fromCol);
         var dests = new List<(int Row, int Col)>();
         if (resp.Params.TryGetValue("to", out var toStr) && !string.IsNullOrWhiteSpace(toStr))
         {
             var parts = toStr.Split('|', StringSplitOptions.RemoveEmptyEntries);
             foreach (var part in parts)
             {
-                dests.Add(ParseCoords(part));
+                if (!TryParseCoords(part, out var toRow, out var toCol))
+                {
+                    toRow = 0;
+                    toCol = 0;
+                }
+                dests.Add((toRow, toCol));
             }
         }
         var mustCapture = resp.Params.TryGetValue("mustCapture", out var mc) && mc == "1";
@@ -288,11 +358,22 @@ public class GameClient : IGameClient, IAsyncDisposable
             {
                 break;
             }
+            catch (SocketException ex) when (ex.SocketErrorCode == SocketError.ConnectionReset)
+            {
+                // Ignore ICMP port unreachable when server isn't up yet.
+                NotifyDisconnected();
+                UpdateServerStatus(ServerStatus.Offline);
+                continue;
+            }
             catch (Exception)
             {
-                Disconnected?.Invoke(this, EventArgs.Empty);
+                NotifyDisconnected();
                 break;
             }
+
+            _lastReceiveAt = DateTimeOffset.UtcNow;
+            Interlocked.Exchange(ref _disconnectNotified, 0);
+            UpdateServerStatus(ServerStatus.Online);
 
             var line = Encoding.UTF8.GetString(result.Buffer).TrimEnd('\n', '\r');
             AppServices.Logger.Info($"RX: {line}");
@@ -304,14 +385,46 @@ public class GameClient : IGameClient, IAsyncDisposable
             var msg = ParseMessage(line);
             if (msg == null)
             {
+                RegisterInvalidServerMessage("PARSE_ERROR");
+                continue;
+            }
+
+            if (!IsServerMessageValid(msg))
+            {
+                if (msg.Type == "GAME_STATE")
+                {
+                    RequestGameStateResyncIfNeeded("INVALID_GAME_STATE");
+                }
+                RegisterInvalidServerMessage("INVALID_MESSAGE");
+                continue;
+            }
+
+            if (!IsMessageAllowedByPhase(msg))
+            {
+                RegisterInvalidServerMessage("UNEXPECTED_PHASE");
+                continue;
+            }
+
+            var hasPending = _pending.TryGetValue(msg.Id, out var pending);
+            var isPushType = IsPushType(msg.Type);
+            var allowedForPending = hasPending && pending!.IsAllowedResponseType(msg.Type);
+
+            if (!hasPending && !isPushType)
+            {
+                RegisterInvalidServerMessage("UNEXPECTED_ID");
+                continue;
+            }
+            if (hasPending && !allowedForPending && !isPushType)
+            {
+                RegisterInvalidServerMessage("UNEXPECTED_RESPONSE");
                 continue;
             }
 
             DispatchPush(msg);
 
-            if (_pending.TryGetValue(msg.Id, out var pending))
+            if (hasPending && allowedForPending)
             {
-                pending.Handle(msg);
+                pending!.Handle(msg);
                 if (pending.IsTerminal)
                 {
                     _pending.TryRemove(msg.Id, out _);
@@ -334,6 +447,10 @@ public class GameClient : IGameClient, IAsyncDisposable
                     int.TryParse(roomIdStr, out var roomId) &&
                     msg.Params.TryGetValue("you", out var role))
                 {
+                    if (!_activeRoomId.HasValue || _activeRoomId == roomId)
+                    {
+                        SetPhase(ClientPhase.InGame, roomId);
+                    }
                     var start = new GameStartInfo(roomId, role);
                     _lastGameStarts[roomId] = start;
                     GameStarted?.Invoke(this, start);
@@ -354,21 +471,20 @@ public class GameClient : IGameClient, IAsyncDisposable
                     msg.Params.TryGetValue("turn", out var turn) &&
                     msg.Params.TryGetValue("board", out var board))
                 {
+                    if (!_activeRoomId.HasValue || _activeRoomId == rId)
+                    {
+                        SetPhase(ClientPhase.InGame, rId);
+                    }
                     msg.Params.TryGetValue("remainingMs", out var remStr);
                     int remMs = 0;
                     int.TryParse(remStr, out remMs);
                     int? lockRow = null;
                     int? lockCol = null;
-                    if (msg.Params.TryGetValue("lock", out var lockStr))
+                    if (msg.Params.TryGetValue("lock", out var lockStr) &&
+                        TryParseCoords(lockStr, out var lr, out var lc))
                     {
-                        var parts = lockStr.Split(',');
-                        if (parts.Length == 2 &&
-                            int.TryParse(parts[0], out var lr) &&
-                            int.TryParse(parts[1], out var lc))
-                        {
-                            lockRow = lr;
-                            lockCol = lc;
-                        }
+                        lockRow = lr;
+                        lockCol = lc;
                     }
                     var state = new GameStateInfo(rId, turn, board, remMs, lockRow, lockCol);
                     _lastGameStates[rId] = state;
@@ -379,6 +495,10 @@ public class GameClient : IGameClient, IAsyncDisposable
                 if (msg.Params.TryGetValue("room", out var reStr) &&
                     int.TryParse(reStr, out var reId))
                 {
+                    if (!_activeRoomId.HasValue || _activeRoomId == reId)
+                    {
+                        SetPhase(ClientPhase.Lobby);
+                    }
                     msg.Params.TryGetValue("reason", out var reason);
                     msg.Params.TryGetValue("winner", out var winner);
                     GameEnded?.Invoke(this, new GameEndInfo(reId, reason ?? string.Empty, winner ?? "NONE"));
@@ -392,11 +512,26 @@ public class GameClient : IGameClient, IAsyncDisposable
                     msg.Params.TryGetValue("resumeBy", out var resumeStr) &&
                     long.TryParse(resumeStr, out var resumeBy))
                 {
+                    if (!_activeRoomId.HasValue || _activeRoomId == prId)
+                    {
+                        SetPhase(ClientPhase.InGame, prId);
+                    }
                     GamePaused?.Invoke(this, (prId, resumeBy));
                 }
                 break;
+            case "ERROR":
+                if (msg.Raw.Contains("TOKEN_NOT_FOUND", StringComparison.OrdinalIgnoreCase) ||
+                    msg.Raw.Contains("TOKEN_EXPIRED", StringComparison.OrdinalIgnoreCase) ||
+                    msg.Raw.Contains("NOT_LOGGED_IN", StringComparison.OrdinalIgnoreCase))
+                {
+                    AppServices.Logger.Info("TOKEN invalid, clearing token");
+                    _token = string.Empty;
+                    ClearSessionCaches();
+                    SetPhase(ClientPhase.LoggedOut);
+                    TokenInvalidated?.Invoke(this, EventArgs.Empty);
+                }
+                break;
             case "RECONNECT_OK":
-                AppServices.Logger.Info("RECONNECT_OK");
                 break;
         }
     }
@@ -416,12 +551,21 @@ public class GameClient : IGameClient, IAsyncDisposable
 
     private async Task HeartbeatLoopAsync(CancellationToken cancellationToken)
     {
-        // Server po ~30s bez provozu odpojuje; posíláme PING každých 10s.
+        // Server po ~30s bez provozu odpojuje; posíláme PING každých 5s.
         while (!cancellationToken.IsCancellationRequested)
         {
             await Task.Delay(_heartbeatInterval, cancellationToken);
             try
             {
+                var elapsed = DateTimeOffset.UtcNow - _lastReceiveAt;
+                if (elapsed > _serverOfflineThreshold)
+                {
+                    UpdateServerStatus(ServerStatus.Offline);
+                }
+                if (elapsed > _disconnectThreshold)
+                {
+                    NotifyDisconnected();
+                }
                 var id = NextId();
                 await SendAsync($"{id};PING\n", cancellationToken);
             }
@@ -431,6 +575,210 @@ public class GameClient : IGameClient, IAsyncDisposable
             }
         }
     }
+
+    private void NotifyDisconnected()
+    {
+        if (Interlocked.Exchange(ref _disconnectNotified, 1) == 1)
+        {
+            return;
+        }
+        Disconnected?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void RegisterInvalidServerMessage(string reason)
+    {
+        var now = DateTimeOffset.UtcNow;
+        if (_invalidWindowStart == default || now - _invalidWindowStart > _invalidWindow)
+        {
+            _invalidServerCount = 0;
+            _invalidWindowStart = now;
+        }
+
+        _invalidServerCount++;
+        AppServices.Logger.Info($"Invalid server message ({reason}), count={_invalidServerCount}.");
+
+        if (_invalidServerCount >= 3)
+        {
+            AppServices.Logger.Error("Invalid server message limit reached, dropping session.");
+            _token = string.Empty;
+            ClearSessionCaches();
+            SetPhase(ClientPhase.LoggedOut);
+            TokenInvalidated?.Invoke(this, EventArgs.Empty);
+        }
+    }
+
+    private void UpdateServerStatus(ServerStatus status)
+    {
+        if (_serverStatus == status)
+        {
+            return;
+        }
+
+        _serverStatus = status;
+        ServerStatusChanged?.Invoke(this, status);
+    }
+
+    private void SetPhase(ClientPhase phase, int? roomId = null)
+    {
+        var phaseChanged = _phase != phase;
+        var roomChanged = roomId.HasValue && (!_activeRoomId.HasValue || _activeRoomId.Value != roomId.Value);
+        if (phaseChanged || roomChanged)
+        {
+            _phaseChangedAt = DateTimeOffset.UtcNow;
+        }
+        _phase = phase;
+        if (roomId.HasValue)
+        {
+            _activeRoomId = roomId.Value;
+        }
+        else if (phase == ClientPhase.LoggedOut || phase == ClientPhase.Lobby)
+        {
+            _activeRoomId = null;
+        }
+    }
+
+    private bool IsWithinPhaseGraceWindow()
+    {
+        return DateTimeOffset.UtcNow - _phaseChangedAt <= _phaseGraceWindow;
+    }
+
+    private bool IsMessageAllowedByPhase(ParsedMessage msg)
+    {
+        if (IsWithinPhaseGraceWindow())
+        {
+            return true;
+        }
+
+        switch (msg.Type)
+        {
+            case "ROOM":
+            case "ROOMS_EMPTY":
+                return _phase == ClientPhase.Lobby;
+            case "GAME_START":
+            case "GAME_STATE":
+            case "GAME_END":
+            case "GAME_PAUSED":
+                if (_phase != ClientPhase.InRoom && _phase != ClientPhase.InGame)
+                {
+                    return false;
+                }
+                if (msg.Params.TryGetValue("room", out var roomStr) &&
+                    int.TryParse(roomStr, out var roomId) &&
+                    _activeRoomId.HasValue &&
+                    _activeRoomId.Value != roomId)
+                {
+                    return false;
+                }
+                return true;
+            default:
+                return true;
+        }
+    }
+
+    private void RequestGameStateResyncIfNeeded(string reason)
+    {
+        if (_phase != ClientPhase.InRoom && _phase != ClientPhase.InGame)
+        {
+            return;
+        }
+        if (string.IsNullOrWhiteSpace(_token))
+        {
+            return;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        if (now - _lastResyncRequest < _resyncCooldown)
+        {
+            return;
+        }
+
+        _lastResyncRequest = now;
+        AppServices.Logger.Info($"Requesting game state resync ({reason}).");
+        _ = TryReconnectAsync(_cts.Token);
+    }
+
+    private static bool IsPushType(string type)
+    {
+        return type is "CONFIG" or "GAME_START" or "GAME_STATE" or "GAME_END" or "GAME_PAUSED" or
+               "PONG" or "RECONNECT_OK" or "BYE_OK" or "ROOM" or "ROOMS_EMPTY";
+    }
+
+    private static int? TryParseRoomId(string roomId)
+    {
+        return int.TryParse(roomId, out var value) ? value : null;
+    }
+
+    private static bool TryParseCoords(string value, out int row, out int col)
+    {
+        row = 0;
+        col = 0;
+        var parts = value.Split(',');
+        return parts.Length == 2 &&
+               int.TryParse(parts[0], out row) &&
+               int.TryParse(parts[1], out col);
+    }
+
+    private static bool IsServerMessageValid(ParsedMessage msg)
+    {
+        switch (msg.Type)
+        {
+            case "ROOMS_EMPTY":
+            case "PONG":
+            case "RECONNECT_OK":
+            case "BYE_OK":
+                return true;
+            case "ROOM":
+                return msg.Params.ContainsKey("id") && msg.Params.ContainsKey("name");
+            case "LOGIN_OK":
+                return msg.Params.ContainsKey("token");
+            case "CREATE_ROOM_OK":
+                return msg.Params.ContainsKey("room") && msg.Params.ContainsKey("name");
+            case "JOIN_ROOM_OK":
+                return msg.Params.ContainsKey("room") && msg.Params.ContainsKey("players");
+            case "LEAVE_ROOM_OK":
+                return msg.Params.ContainsKey("room");
+            case "CONFIG":
+                return msg.Params.TryGetValue("turnTimeoutMs", out var ttStr) && int.TryParse(ttStr, out _);
+            case "GAME_START":
+                return msg.Params.ContainsKey("room") && msg.Params.ContainsKey("you");
+            case "GAME_STATE":
+                if (!msg.Params.TryGetValue("room", out var roomStr) || !int.TryParse(roomStr, out _)) return false;
+                if (!msg.Params.TryGetValue("turn", out _)) return false;
+                if (!msg.Params.TryGetValue("board", out var board) || board.Length != 64) return false;
+                if (msg.Params.TryGetValue("remainingMs", out var remStr) && !int.TryParse(remStr, out _)) return false;
+                if (msg.Params.TryGetValue("lock", out var lockStr) && !TryParseCoords(lockStr, out _, out _)) return false;
+                return true;
+            case "GAME_END":
+                return msg.Params.ContainsKey("room");
+            case "GAME_PAUSED":
+                return msg.Params.TryGetValue("room", out var prStr) && int.TryParse(prStr, out _) &&
+                       msg.Params.TryGetValue("resumeBy", out var resumeStr) && long.TryParse(resumeStr, out _);
+            case "LEGAL_MOVES":
+                if (!msg.Params.TryGetValue("room", out var lmRoom) || !int.TryParse(lmRoom, out _)) return false;
+                if (!msg.Params.TryGetValue("from", out var fromStr) || !TryParseCoords(fromStr, out _, out _)) return false;
+                if (!msg.Params.TryGetValue("mustCapture", out var mc) || (mc != "0" && mc != "1")) return false;
+                if (msg.Params.TryGetValue("to", out var toStr) && !string.IsNullOrWhiteSpace(toStr))
+                {
+                    var parts = toStr.Split('|', StringSplitOptions.RemoveEmptyEntries);
+                    foreach (var part in parts)
+                    {
+                        if (!TryParseCoords(part, out _, out _)) return false;
+                    }
+                }
+                return true;
+            case "ERROR":
+                return msg.RawParams.Count > 0;
+            default:
+                return false;
+        }
+    }
+
+    private void ClearSessionCaches()
+    {
+        _lastGameStarts.Clear();
+        _lastGameStates.Clear();
+    }
+
 
     private static ParsedMessage? ParseMessage(string line)
     {
@@ -457,18 +805,6 @@ public class GameClient : IGameClient, IAsyncDisposable
         }
 
         return new ParsedMessage(id, type, rawParams, dict, line);
-    }
-
-    private static (int Row, int Col) ParseCoords(string value)
-    {
-        var parts = value.Split(',');
-        if (parts.Length == 2 &&
-            int.TryParse(parts[0], out var r) &&
-            int.TryParse(parts[1], out var c))
-        {
-            return (r, c);
-        }
-        return (0, 0);
     }
 
     private static RoomInfo ToRoomInfo(ParsedMessage msg)
@@ -502,6 +838,14 @@ public class GameClient : IGameClient, IAsyncDisposable
         public string Raw { get; }
     }
 
+    private enum ClientPhase
+    {
+        LoggedOut,
+        Lobby,
+        InRoom,
+        InGame
+    }
+
     private enum RequestKind
     {
         Single,
@@ -513,16 +857,19 @@ public class GameClient : IGameClient, IAsyncDisposable
         private readonly TaskCompletionSource<ParsedMessage> _singleTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly List<RoomInfo> _rooms = new();
         private readonly object _lock = new();
+        private readonly HashSet<string> _allowedTypes;
         private bool _completed;
 
-        public PendingRequest(RequestKind kind)
+        public PendingRequest(RequestKind kind, IEnumerable<string> allowedTypes)
         {
             Kind = kind;
+            _allowedTypes = new HashSet<string>(allowedTypes, StringComparer.OrdinalIgnoreCase);
         }
 
         public RequestKind Kind { get; }
         public Task<ParsedMessage> SingleTask => _singleTcs.Task;
         public bool IsTerminal => _completed;
+        public bool IsAllowedResponseType(string type) => _allowedTypes.Contains(type);
 
         public void Handle(ParsedMessage msg)
         {

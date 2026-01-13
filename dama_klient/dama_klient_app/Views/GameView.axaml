@@ -38,43 +38,49 @@
                 Background="#f7f7f7"
                 CornerRadius="12"
                 Padding="8">
-            <ItemsControl ItemsSource="{Binding Cells}">
-                <ItemsControl.ItemsPanel>
-                    <ItemsPanelTemplate>
-                        <primitives:UniformGrid Columns="{Binding BoardSize}"
-                                                Rows="{Binding BoardSize}" />
-                    </ItemsPanelTemplate>
-                </ItemsControl.ItemsPanel>
-                <ItemsControl.ItemTemplate>
-                    <DataTemplate DataType="vm:BoardCellViewModel">
-                        <Button Command="{Binding ClickCommand}"
-                                Background="Transparent"
-                                BorderThickness="0"
-                                Padding="0"
-                                HorizontalAlignment="Stretch"
-                                VerticalAlignment="Stretch">
-                            <Border Background="{Binding Background}"
-                                    CornerRadius="4"
-                                    Margin="1"
-                                    Padding="2">
-                                <Grid>
-                                    <Ellipse Fill="{Binding Piece.Fill}"
-                                             Stroke="{Binding Piece.Stroke}"
-                                             StrokeThickness="2"
-                                             IsVisible="{Binding HasPiece}" />
-                                    <TextBlock Text="♔"
-                                               FontWeight="Bold"
-                                               Foreground="#d9b650"
-                                               FontSize="25"
-                                               HorizontalAlignment="Center"
-                                               VerticalAlignment="Center"
-                                               IsVisible="{Binding Piece.IsKing, FallbackValue=False}" />
-                                </Grid>
-                            </Border>
-                        </Button>
-                    </DataTemplate>
-                </ItemsControl.ItemTemplate>
-            </ItemsControl>
+            <Grid>
+                <ItemsControl ItemsSource="{Binding Cells}"
+                              IsEnabled="{Binding IsBoardEnabled}">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <primitives:UniformGrid Columns="{Binding BoardSize}"
+                                                    Rows="{Binding BoardSize}" />
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate DataType="vm:BoardCellViewModel">
+                            <Button Command="{Binding ClickCommand}"
+                                    Background="Transparent"
+                                    BorderThickness="0"
+                                    Padding="0"
+                                    HorizontalAlignment="Stretch"
+                                    VerticalAlignment="Stretch">
+                                <Border Background="{Binding Background}"
+                                        CornerRadius="4"
+                                        Margin="1"
+                                        Padding="2">
+                                    <Grid>
+                                        <Ellipse Fill="{Binding Piece.Fill}"
+                                                 Stroke="{Binding Piece.Stroke}"
+                                                 StrokeThickness="2"
+                                                 IsVisible="{Binding HasPiece}" />
+                                        <TextBlock Text="♔"
+                                                   FontWeight="Bold"
+                                                   Foreground="#d9b650"
+                                                   FontSize="25"
+                                                   HorizontalAlignment="Center"
+                                                   VerticalAlignment="Center"
+                                                   IsVisible="{Binding Piece.IsKing, FallbackValue=False}" />
+                                    </Grid>
+                                </Border>
+                            </Button>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+                <Border Background="#FFF5F5F5"
+                        Opacity="0.5"
+                        IsVisible="{Binding ShowPauseOverlay}" />
+            </Grid>
         </Border>
 
         <Border Grid.Row="1"
@@ -88,6 +94,16 @@
                 <TextBlock Text="Stav hry"
                            FontSize="16"
                            FontWeight="SemiBold" />
+                <StackPanel Orientation="Horizontal"
+                            Spacing="6"
+                            VerticalAlignment="Center">
+                    <Ellipse Width="8"
+                             Height="8"
+                             Fill="{Binding ServerStatusBrush}"
+                             VerticalAlignment="Center" />
+                    <TextBlock Text="{Binding ServerStatusText}"
+                               Foreground="Gray" />
+                </StackPanel>
 
                 <StackPanel Orientation="Horizontal"
                             Spacing="8"

@@ -11,10 +11,13 @@ public interface IGameClient
     bool IsConnected { get; }
     int TurnTimeoutMs { get; }
     string Token { get; }
+    ServerStatus ServerStatus { get; }
     void ConfigureEndpoint(string host, int port);
     Task TryReconnectAsync(CancellationToken cancellationToken = default);
 
     event EventHandler? Disconnected;
+    event EventHandler<ServerStatus>? ServerStatusChanged;
+    event EventHandler? TokenInvalidated;
     event EventHandler<IReadOnlyList<RoomInfo>>? LobbyUpdated;
     event EventHandler<GameStartInfo>? GameStarted;
     event EventHandler<GameStateInfo>? GameStateUpdated;

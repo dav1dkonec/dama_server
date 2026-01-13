@@ -1,6 +1,7 @@
 using System;
 using System.Threading.Tasks;
 using System.Windows.Input;
+using dama_klient_app.Models;
 using dama_klient_app.Services;
 using System.Net.Sockets;
 using Avalonia.Threading;
@@ -25,8 +26,10 @@ public class LoginViewModel : ViewModelBase
     private bool _isDiscovering;
     private bool _discoveryAttempted;
     private IBrush _statusBrush = Brushes.Gray;
+    private string _serverStatusText = "Server neznámý";
+    private IBrush _serverStatusBrush = Brushes.Gray;
 
-    public LoginViewModel(IGameClient gameClient, Action<string> onLoginCompleted)
+    public LoginViewModel(IGameClient gameClient, Action<string> onLoginCompleted, string? loginNotice)
     {
         GameClient = gameClient;
         _onLoginAsync = nickname =>
@@ -36,6 +39,12 @@ public class LoginViewModel : ViewModelBase
         };
         _discoverAsync = () => DiscoveryClient.DiscoverAsync();
         ConnectCommand = new AsyncCommand(ConnectAsync, () => !IsBusy && !string.IsNullOrWhiteSpace(Nickname));
+        UpdateServerStatus(GameClient.ServerStatus);
+        GameClient.ServerStatusChanged += OnServerStatusChanged;
+        if (!string.IsNullOrWhiteSpace(loginNotice))
+        {
+            ErrorMessage = loginNotice;
+        }
         _ = AutoDiscoverAsync();
     }
 
@@ -120,6 +129,18 @@ public class LoginViewModel : ViewModelBase
         private set => SetField(ref _statusBrush, value);
     }
 
+    public string ServerStatusText
+    {
+        get => _serverStatusText;
+        private set => SetField(ref _serverStatusText, value);
+    }
+
+    public IBrush ServerStatusBrush
+    {
+        get => _serverStatusBrush;
+        private set => SetField(ref _serverStatusBrush, value);
+    }
+
     // Připojí se na server, provede LOGIN a předá nick do parent VM.
     private async Task ConnectAsync()
     {
@@ -152,6 +173,7 @@ public class LoginViewModel : ViewModelBase
             AppServices.Logger.Info($"Login OK as '{trimmed}'");
             if (_onLoginAsync != null)
             {
+                GameClient.ServerStatusChanged -= OnServerStatusChanged;
                 await _onLoginAsync(trimmed);
             }
         }
@@ -163,6 +185,30 @@ public class LoginViewModel : ViewModelBase
         finally
         {
             IsBusy = false;
+        }
+    }
+
+    private void OnServerStatusChanged(object? sender, ServerStatus status)
+    {
+        Dispatcher.UIThread.Post(() => UpdateServerStatus(status));
+    }
+
+    private void UpdateServerStatus(ServerStatus status)
+    {
+        switch (status)
+        {
+            case ServerStatus.Online:
+                ServerStatusText = "Server online";
+                ServerStatusBrush = Brushes.ForestGreen;
+                break;
+            case ServerStatus.Offline:
+                ServerStatusText = "Spojení přerušeno";
+                ServerStatusBrush = Brushes.IndianRed;
+                break;
+            default:
+                ServerStatusText = "Server neznámý";
+                ServerStatusBrush = Brushes.Gray;
+                break;
         }
     }
 

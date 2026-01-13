@@ -141,7 +141,7 @@ int main(int argc, char* argv[]) {
 
     // Stav serveru
     PlayersMap players;
-    std::map<std::string, std::string> tokenToKey; // token -> clientKey
+    EndpointMap endpointToToken; // clientKey -> token
     RoomsMap rooms;
     int nextPlayerId = 1;
     int nextRoomId   = 1;
@@ -239,57 +239,109 @@ int main(int argc, char* argv[]) {
             std::string resp = "0;ERROR;INVALID_FORMAT;Cannot parse message\n";
             sendto(sockfd, resp.c_str(), resp.size(), 0,
                    reinterpret_cast<sockaddr*>(&clientAddr), clientLen);
+            std::string invalidKey = addrToKey(clientAddr);
+            auto itInvalidEndpoint = endpointToToken.find(invalidKey);
+            if (itInvalidEndpoint != endpointToToken.end()) {
+                registerInvalidMessage(itInvalidEndpoint->second, players, rooms, sockfd, "INVALID_FORMAT");
+            }
             continue;
         }
 
         std::string clientKey = addrToKey(clientAddr);
+        std::string playerToken;
         auto now = std::chrono::steady_clock::now();
 
-        auto itPlayerSeen = players.find(clientKey);
-        if (itPlayerSeen != players.end()) {
-            itPlayerSeen->second.lastSeen = now;
-            itPlayerSeen->second.connected = true;
-            itPlayerSeen->second.addr = clientAddr;
-            itPlayerSeen->second.paused = false;
-            itPlayerSeen->second.resumeDeadline = std::chrono::steady_clock::time_point{};
+        auto itEndpoint = endpointToToken.find(clientKey);
+        if (itEndpoint != endpointToToken.end()) {
+            playerToken = itEndpoint->second;
+            auto itPlayerSeen = players.find(playerToken);
+            if (itPlayerSeen != players.end()) {
+                itPlayerSeen->second.lastSeen = now;
+                if (!itPlayerSeen->second.paused) {
+                    itPlayerSeen->second.connected = true;
+                    itPlayerSeen->second.addr = clientAddr;
+                }
+            } else {
+                endpointToToken.erase(itEndpoint);
+                playerToken.clear();
+            }
         }
+
+        auto sendNotLoggedIn = [&]() {
+            std::string resp = std::to_string(msg.id) + ";ERROR;NOT_LOGGED_IN\n";
+            sendto(sockfd, resp.c_str(), resp.size(), 0,
+                   reinterpret_cast<sockaddr*>(&clientAddr), clientLen);
+        };
 
         if (msg.type == "LOGIN") {
             handleLogin(msg, clientKey, players, nextPlayerId, limits,
-                        sockfd, clientAddr, clientLen, turnTimeoutMs, reconnectWindowMs, tokenToKey);
+                        sockfd, clientAddr, clientLen, turnTimeoutMs, reconnectWindowMs, endpointToToken);
         }
         else if (msg.type == "PING") {
+            if (!playerToken.empty()) {
+                std::cout << "[PING] token=" << playerToken
+                          << " addr=" << clientKey << std::endl;
+            }
             handlePing(msg, sockfd, clientAddr, clientLen);
         }
         else if (msg.type == "LIST_ROOMS") {
-            handleListRooms(msg, rooms, sockfd, clientAddr, clientLen);
+            if (playerToken.empty()) {
+                sendNotLoggedIn();
+            } else {
+                handleListRooms(msg, rooms, sockfd, clientAddr, clientLen);
+            }
         }
         else if (msg.type == "CREATE_ROOM") {
-            handleCreateRoom(msg, rooms, nextRoomId, limits,
+            if (playerToken.empty()) {
+                sendNotLoggedIn();
+            } else {
+                handleCreateRoom(msg, playerToken, rooms, players, nextRoomId, limits,
                              sockfd, clientAddr, clientLen, limits);
+            }
         }
         else if (msg.type == "JOIN_ROOM") {
-            handleJoinRoom(msg, clientKey, rooms, players,
-                           sockfd, clientAddr, clientLen, turnTimeoutMs);
+            if (playerToken.empty()) {
+                sendNotLoggedIn();
+            } else {
+                handleJoinRoom(msg, playerToken, rooms, players,
+                               sockfd, clientAddr, clientLen, turnTimeoutMs);
+            }
         }
         else if (msg.type == "MOVE") {
-            handleMove(msg, clientKey, rooms, players,
-                        sockfd, clientAddr, clientLen, turnTimeoutMs);
+            if (playerToken.empty()) {
+                sendNotLoggedIn();
+            } else {
+                handleMove(msg, playerToken, rooms, players,
+                            sockfd, clientAddr, clientLen, turnTimeoutMs);
+            }
         }
         else if (msg.type == "LEAVE_ROOM") {
-            handleLeaveRoom(msg, clientKey, rooms, players,
-                            sockfd, clientAddr, clientLen, reconnectWindowMs);
+            if (playerToken.empty()) {
+                sendNotLoggedIn();
+            } else {
+                handleLeaveRoom(msg, playerToken, rooms, players,
+                                sockfd, clientAddr, clientLen, reconnectWindowMs);
+            }
         }
         else if (msg.type == "LEGAL_MOVES") {
-            handleLegalMoves(msg, clientKey, rooms, players,
-                             sockfd, clientAddr, clientLen);
+            if (playerToken.empty()) {
+                sendNotLoggedIn();
+            } else {
+                handleLegalMoves(msg, playerToken, rooms, players,
+                                 sockfd, clientAddr, clientLen);
+            }
         }
         else if (msg.type == "BYE") {
-            handleBye(msg, clientKey, players, rooms, tokenToKey, sockfd, clientAddr, clientLen);
+            if (playerToken.empty()) {
+                sendNotLoggedIn();
+            } else {
+                handleBye(msg, playerToken, players, rooms, endpointToToken, sockfd, clientAddr, clientLen);
+                endpointToToken.erase(clientKey);
+            }
             continue;
         }
         else if (msg.type == "CONFIG_ACK") {
-            auto pit = players.find(clientKey);
+            auto pit = players.find(playerToken);
             if (pit != players.end()) {
                 pit->second.configAcked = true;
                 std::cout << "[INFO] CONFIG_ACK from " << clientKey << std::endl;
@@ -303,16 +355,19 @@ int main(int argc, char* argv[]) {
                                ";ERROR;UNSUPPORTED_TYPE;Nepodporovaný typ zprávy\n";
             sendto(sockfd, resp.c_str(), resp.size(), 0,
                    reinterpret_cast<sockaddr*>(&clientAddr), clientLen);
+            if (!playerToken.empty()) {
+                registerInvalidMessage(playerToken, players, rooms, sockfd, "UNSUPPORTED_TYPE");
+            }
         }
 
         if (std::chrono::duration_cast<std::chrono::milliseconds>(
                 now - lastTimeoutCheck).count() > timeoutCheckIntervalMs) {
             int effectiveHeartbeatMs = timeoutMs * timeoutGrace;
-            checkTimeouts(players, rooms, effectiveHeartbeatMs, turnTimeoutMs, sockfd, reconnectWindowMs, tokenToKey);
+            checkTimeouts(players, rooms, effectiveHeartbeatMs, turnTimeoutMs, sockfd, reconnectWindowMs, endpointToToken);
             lastTimeoutCheck = now;
         }
 
-        auto pit = players.find(clientKey);
+        auto pit = players.find(playerToken);
         if (pit != players.end() && !pit->second.configAcked) {
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - pit->second.lastConfigSent).count();
             if (pit->second.lastConfigSent == std::chrono::steady_clock::time_point{} || elapsed > 3000) {
@@ -331,14 +386,7 @@ int main(int argc, char* argv[]) {
                 continue;
             }
             std::string token = msg.rawParams[0];
-            auto tk = tokenToKey.find(token);
-            if (tk == tokenToKey.end()) {
-                std::string resp = std::to_string(msg.id) + ";ERROR;TOKEN_NOT_FOUND\n";
-                sendto(sockfd, resp.c_str(), resp.size(), 0,
-                       reinterpret_cast<sockaddr*>(&clientAddr), clientLen);
-                continue;
-            }
-            auto pitToken = players.find(tk->second);
+            auto pitToken = players.find(token);
             if (pitToken == players.end()) {
                 std::string resp = std::to_string(msg.id) + ";ERROR;TOKEN_NOT_FOUND\n";
                 sendto(sockfd, resp.c_str(), resp.size(), 0,
@@ -360,16 +408,70 @@ int main(int argc, char* argv[]) {
             p.lastSeen = nowTs;
             p.paused = false;
             p.resumeDeadline = std::chrono::steady_clock::time_point{};
+            for (auto it = endpointToToken.begin(); it != endpointToToken.end();) {
+                if (it->second == token) {
+                    it = endpointToToken.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+            endpointToToken[clientKey] = token;
             std::string resp = std::to_string(msg.id) + ";RECONNECT_OK\n";
             sendto(sockfd, resp.c_str(), resp.size(), 0,
                    reinterpret_cast<sockaddr*>(&clientAddr), clientLen);
-            std::cout << "[INFO] RECONNECT_OK token=" << token << " key=" << tk->second << std::endl;
-            // pošle poslední game state jestli room existuje a resetuje timer tahu
+            std::cout << "[INFO] RECONNECT_OK token=" << token << " key=" << clientKey << std::endl;
+            // pošle poslední game state jen pokud jsou oba hráči připojeni (jinak zůstává pauza)
+            auto nowSys = std::chrono::system_clock::now();
             for (auto& [roomId, room] : rooms) {
-                auto it = std::find(room.playerKeys.begin(), room.playerKeys.end(), tk->second);
+                auto it = std::find(room.playerKeys.begin(), room.playerKeys.end(), token);
                 if (it == room.playerKeys.end()) continue;
-                sendGameStateToPlayer(msg.id, room, p, sockfd, turnTimeoutMs);
-                room.lastTurnAt = nowTs;
+                if (room.status != RoomStatus::IN_GAME) continue;
+
+                bool allReady = true;
+                long long resumeByEpochMs = 0;
+                for (const auto& pKey : room.playerKeys) {
+                    auto pit = players.find(pKey);
+                    if (pit == players.end()) {
+                        allReady = false;
+                        continue;
+                    }
+                    const Player& rp = pit->second;
+                    if (rp.paused || !rp.connected) {
+                        allReady = false;
+                    }
+                    if (rp.paused && rp.resumeDeadline != std::chrono::steady_clock::time_point{}) {
+                        auto remaining = rp.resumeDeadline - nowTs;
+                        if (remaining > std::chrono::milliseconds::zero()) {
+                            auto candidate = nowSys + remaining;
+                            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                candidate.time_since_epoch()).count();
+                            resumeByEpochMs = std::max(resumeByEpochMs, ms);
+                        }
+                    }
+                }
+
+                if (allReady) {
+                    if (room.remainingTurnMs >= 0) {
+                        room.lastTurnAt = nowTs - std::chrono::milliseconds(turnTimeoutMs - room.remainingTurnMs);
+                        room.remainingTurnMs = -1;
+                    } else if (room.lastTurnAt == std::chrono::steady_clock::time_point{}) {
+                        room.lastTurnAt = nowTs;
+                    }
+                    for (const auto& pKey : room.playerKeys) {
+                        auto pit = players.find(pKey);
+                        if (pit == players.end()) continue;
+                        sendGameStateToPlayer(msg.id, room, pit->second, sockfd, turnTimeoutMs);
+                    }
+                } else {
+                    if (resumeByEpochMs == 0) {
+                        resumeByEpochMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            (nowSys + std::chrono::milliseconds(reconnectWindowMs)).time_since_epoch()).count();
+                    }
+                    std::string pauseMsg = "0;GAME_PAUSED;room=" + std::to_string(room.id) +
+                                           ";resumeBy=" + std::to_string(resumeByEpochMs) + "\n";
+                    sendto(sockfd, pauseMsg.c_str(), pauseMsg.size(), 0,
+                           reinterpret_cast<sockaddr*>(&clientAddr), clientLen);
+                }
             }
             continue;
         }

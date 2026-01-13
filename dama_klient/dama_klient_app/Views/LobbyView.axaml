@@ -6,6 +6,7 @@
              x:DataType="vm:LobbyViewModel">
     <DockPanel>
         <Grid ColumnDefinitions="*,Auto"
+              RowDefinitions="Auto,Auto"
               DockPanel.Dock="Top"
               Margin="0 0 0 12">
             <StackPanel Orientation="Horizontal"
@@ -21,13 +22,27 @@
             <StackPanel Orientation="Horizontal"
                         Spacing="8"
                         HorizontalAlignment="Right"
-                        Grid.Column="1">
+                        Grid.Column="1"
+                        Grid.Row="0">
                 <Button Content="Obnovit"
                         Command="{Binding RefreshCommand}" />
                 <Button Content="Vytvořit stůl"
                         Command="{Binding CreateRoomCommand}" />
                 <Button Content="Odhlásit"
                         Command="{Binding LogoutCommand}" />
+            </StackPanel>
+            <StackPanel Orientation="Horizontal"
+                        Spacing="6"
+                        Grid.Column="1"
+                        Grid.Row="1"
+                        HorizontalAlignment="Right"
+                        Margin="0 6 0 0">
+                <Ellipse Width="8"
+                         Height="8"
+                         Fill="{Binding ServerStatusBrush}"
+                         VerticalAlignment="Center" />
+                <TextBlock Text="{Binding ServerStatusText}"
+                           Foreground="Gray" />
             </StackPanel>
         </Grid>
 
@@ -65,7 +80,7 @@
                             HorizontalAlignment="Center"
                             HorizontalContentAlignment="Center" />
                 </Grid>
-                <TextBlock Text="Vyberte room a připojte se."
+                <TextBlock Text="Vyberte stůl a připojte se."
                            Foreground="Gray"
                            FontSize="12"
                            TextWrapping="Wrap"

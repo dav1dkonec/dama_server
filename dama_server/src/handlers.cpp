@@ -156,6 +156,83 @@ bool playerHasAnyMove(const Room& room, PieceColor color) {
     return playerHasAnySimpleMove(room, color);
 }
 
+bool roomHasPausedPlayer(const Room& room, const PlayersMap& players) {
+    for (const auto& key : room.playerKeys) {
+        auto pit = players.find(key);
+        if (pit == players.end()) {
+            return true;
+        }
+        if (pit->second.paused || !pit->second.connected) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void sendGameEnd(int msgId, Room& room, const PlayersMap& players, int sockfd, const std::string& reason, const std::string& winnerOverride = "NONE") {
+    room.status = RoomStatus::FINISHED;
+    room.turn   = Turn::NONE;
+    room.captureLock.reset();
+
+    std::string winner = winnerOverride;
+    if (winner == "NONE") {
+        if (reason.find("WHITE_WIN") != std::string::npos) {
+            winner = "WHITE";
+        } else if (reason.find("BLACK_WIN") != std::string::npos) {
+            winner = "BLACK";
+        }
+    }
+
+    for (const auto& pKey : room.playerKeys) {
+        auto pit = players.find(pKey);
+        if (pit == players.end()) continue;
+
+        const Player& p = pit->second;
+        sockaddr_in pAddr = p.addr;
+        socklen_t pLen = sizeof(pAddr);
+
+        std::string resp = std::to_string(msgId) +
+                           ";GAME_END;room=" + std::to_string(room.id) +
+                           ";reason=" + reason +
+                           ";winner=" + winner + "\n";
+
+        sendto(sockfd, resp.c_str(), resp.size(), 0,
+               reinterpret_cast<const sockaddr*>(&pAddr), pLen);
+    }
+
+    std::cout << "[INFO] GAME_END room=" << room.id
+              << " reason=" << reason
+              << " winner=" << winner << std::endl;
+}
+
+static void resetRoom(Room& room) {
+    room.status = RoomStatus::WAITING;
+    room.turn = Turn::NONE;
+    room.board.clear();
+    room.captureLock.reset();
+    room.lastTurnAt = std::chrono::steady_clock::time_point{};
+    room.remainingTurnMs = -1;
+    room.playerKeys.clear();
+}
+
+void dropPlayerForInvalid(const std::string& playerToken, PlayersMap& players, RoomsMap& rooms, int sockfd) {
+    for (auto& [roomId, room] : rooms) {
+        auto it = std::find(room.playerKeys.begin(), room.playerKeys.end(), playerToken);
+        if (it == room.playerKeys.end()) continue;
+
+        if (room.status == RoomStatus::IN_GAME) {
+            sendGameEnd(0, room, players, sockfd, "OPPONENT_LEFT");
+            resetRoom(room);
+        } else {
+            room.playerKeys.erase(it);
+            if (room.playerKeys.empty()) {
+                resetRoom(room);
+            }
+        }
+    }
+    players.erase(playerToken);
+}
+
 std::vector<std::pair<int, int>> kingSimpleMoves(const Room& room, int row, int col) {
     std::vector<std::pair<int, int>> out;
     for (auto [dr, dc] : moveDirections('W')) {
@@ -228,48 +305,6 @@ std::vector<std::pair<int, int>> manCaptureMoves(const Room& room, int row, int 
     return out;
 }
 
-void sendGameEnd(
-    int msgId,
-    Room& room,
-    const PlayersMap& players,
-    int sockfd,
-    const std::string& reason,
-    const std::string& winnerOverride = "NONE"
-) {
-    room.status = RoomStatus::FINISHED;
-    room.turn   = Turn::NONE;
-    room.captureLock.reset();
-
-    std::string winner = winnerOverride;
-    if (winner == "NONE") {
-        if (reason.find("WHITE_WIN") != std::string::npos) {
-            winner = "WHITE";
-        } else if (reason.find("BLACK_WIN") != std::string::npos) {
-            winner = "BLACK";
-        }
-    }
-
-    for (const auto& pKey : room.playerKeys) {
-        auto pit = players.find(pKey);
-        if (pit == players.end()) continue;
-
-        const Player& p = pit->second;
-        sockaddr_in pAddr = p.addr;
-        socklen_t pLen = sizeof(pAddr);
-
-        std::string resp = std::to_string(msgId) +
-                           ";GAME_END;room=" + std::to_string(room.id) +
-                           ";reason=" + reason +
-                           ";winner=" + winner + "\n";
-
-        sendto(sockfd, resp.c_str(), resp.size(), 0,
-               reinterpret_cast<const sockaddr*>(&pAddr), pLen);
-    }
-
-    std::cout << "[INFO] GAME_END room=" << room.id
-              << " reason=" << reason
-              << " winner=" << winner << std::endl;
-}
 
 // Broadcast GAME_STATE to all players in room
 // Response: ID;GAME_STATE;room=<roomId>;turn=<PLAYER1|PLAYER2|NONE>;board=<64 chars>
@@ -285,6 +320,8 @@ void broadcastGameState(
     if (room.lastTurnAt != std::chrono::steady_clock::time_point{}) {
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - room.lastTurnAt).count();
         remainingMs = std::max(0LL, static_cast<long long>(turnTimeoutMs) - elapsed);
+    } else if (room.remainingTurnMs >= 0) {
+        remainingMs = room.remainingTurnMs;
     }
 
     for (const auto& pKey : room.playerKeys) {
@@ -310,15 +347,6 @@ void broadcastGameState(
     }
 }
 
-static void resetRoom(Room& room) {
-    room.status = RoomStatus::WAITING;
-    room.turn = Turn::NONE;
-    room.board.clear();
-    room.captureLock.reset();
-    room.lastTurnAt = std::chrono::steady_clock::time_point{};
-    room.playerKeys.clear();
-}
-
 } // namespace
 
 void sendGameStateToPlayer(int msgId, const Room& room, const Player& p, int sockfd, int turnTimeoutMs)
@@ -328,6 +356,8 @@ void sendGameStateToPlayer(int msgId, const Room& room, const Player& p, int soc
     if (room.lastTurnAt != std::chrono::steady_clock::time_point{}) {
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - room.lastTurnAt).count();
         remainingMs = std::max(0LL, static_cast<long long>(turnTimeoutMs) - elapsed);
+    } else if (room.remainingTurnMs >= 0) {
+        remainingMs = room.remainingTurnMs;
     }
 
     sockaddr_in pAddr = p.addr;
@@ -345,11 +375,19 @@ void sendGameStateToPlayer(int msgId, const Room& room, const Player& p, int soc
            reinterpret_cast<const sockaddr*>(&pAddr), pLen);
 }
 
-void pauseRoom(Room& room, PlayersMap& players, int sockfd, int reconnectWindowMs, const std::string& offenderKey)
+void pauseRoom(Room& room, PlayersMap& players, int sockfd, int reconnectWindowMs, int turnTimeoutMs, const std::string& offenderKey)
 {
     room.status = RoomStatus::IN_GAME;
+    if (room.lastTurnAt != std::chrono::steady_clock::time_point{}) {
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - room.lastTurnAt).count();
+        room.remainingTurnMs = std::max(0, turnTimeoutMs - static_cast<int>(elapsed));
+    }
     room.lastTurnAt = std::chrono::steady_clock::time_point{}; // stop turn timer
     auto now = std::chrono::steady_clock::now();
+    auto nowSys = std::chrono::system_clock::now();
+    auto resumeByEpochMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        nowSys.time_since_epoch() + std::chrono::milliseconds(reconnectWindowMs)).count();
     for (const auto& key : room.playerKeys) {
         auto it = players.find(key);
         if (it == players.end()) continue;
@@ -371,8 +409,7 @@ void pauseRoom(Room& room, PlayersMap& players, int sockfd, int reconnectWindowM
             sockaddr_in pAddr = p.addr;
             socklen_t pLen = sizeof(pAddr);
             std::string msg = "0;GAME_PAUSED;room=" + std::to_string(room.id) +
-                              ";resumeBy=" + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
-                                  now.time_since_epoch() + std::chrono::milliseconds(reconnectWindowMs)).count()) + "\n";
+                              ";resumeBy=" + std::to_string(resumeByEpochMs) + "\n";
             sendto(sockfd, msg.c_str(), msg.size(), 0,
                    reinterpret_cast<const sockaddr*>(&pAddr), pLen);
             std::cout << "[INFO] GAME_PAUSED room=" << room.id << " resumeBy=" << p.resumeDeadline.time_since_epoch().count() << std::endl;
@@ -409,7 +446,7 @@ void handleLogin(
     socklen_t clientLen,
     int turnTimeoutMs,
     int reconnectWindowMs,
-    std::map<std::string, std::string>& tokenToKey
+    EndpointMap& endpointToToken
 ) {
     if (msg.rawParams.size() < 1) {
         std::string resp = std::to_string(msg.id) +
@@ -460,9 +497,8 @@ void handleLogin(
         p.token = ss.str();
     }
     p.tokenExpires = std::chrono::steady_clock::time_point{};
-    tokenToKey[p.token] = clientKey;
-
-    players[clientKey] = p;
+    players[p.token] = p;
+    endpointToToken[clientKey] = p.token;
 
     std::cout << "New player: id=" << p.id
               << " nick=" << p.nick
@@ -475,12 +511,38 @@ void handleLogin(
     sendto(sockfd, resp.c_str(), resp.size(), 0,
            reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
 
-    sendConfig(players[clientKey], sockfd, turnTimeoutMs);
+    sendConfig(players[p.token], sockfd, turnTimeoutMs);
 
     std::cout << "[INFO] LOGIN player=" << p.id
               << " nick=" << p.nick
               << " key=" << clientKey
               << " turnTimeoutMs=" << turnTimeoutMs << std::endl;
+}
+
+void registerInvalidMessage(const std::string& playerToken, PlayersMap& players, RoomsMap& rooms, int sockfd, const std::string& reason)
+{
+    if (playerToken.empty()) return;
+
+    auto pit = players.find(playerToken);
+    if (pit == players.end()) return;
+
+    auto& player = pit->second;
+    auto now = std::chrono::steady_clock::now();
+    if (player.invalidWindowStart == std::chrono::steady_clock::time_point{} ||
+        now - player.invalidWindowStart > std::chrono::seconds(30)) {
+        player.invalidCount = 0;
+        player.invalidWindowStart = now;
+    }
+
+    player.invalidCount++;
+    std::cout << "[WARN] INVALID_MESSAGE token=" << playerToken
+              << " count=" << player.invalidCount
+              << " reason=" << reason << std::endl;
+
+    if (player.invalidCount >= 3) {
+        std::cout << "[WARN] DROP_PLAYER token=" << playerToken << " invalid messages limit reached" << std::endl;
+        dropPlayerForInvalid(playerToken, players, rooms, sockfd);
+    }
 }
 
 // PING
@@ -496,7 +558,6 @@ void handlePing(
     std::string resp = std::to_string(msg.id) + ";PONG\n";
     sendto(sockfd, resp.c_str(), resp.size(), 0,
            reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
-    std::cout << "[PING] from " << addrToKey(clientAddr) << std::endl;
 }
 
 // LIST_ROOMS
@@ -551,7 +612,9 @@ void handleListRooms(
 // Příklad: 4;CREATE_ROOM;Room1 -> 4;CREATE_ROOM_OK;room=1
 void handleCreateRoom(
     const Message& msg,
+    const std::string& playerToken,
     RoomsMap& rooms,
+    PlayersMap& players,
     int& nextRoomId,
     const ServerLimits& limits,
     int sockfd,
@@ -564,6 +627,7 @@ void handleCreateRoom(
                            ";ERROR;INVALID_FORMAT;Missing room name\n";
         sendto(sockfd, resp.c_str(), resp.size(), 0,
                reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+        registerInvalidMessage(playerToken, players, rooms, sockfd, "INVALID_FORMAT");
         return;
     }
 
@@ -574,6 +638,7 @@ void handleCreateRoom(
                            ";ERROR;INVALID_FORMAT;Invalid chars in room name\n";
         sendto(sockfd, resp.c_str(), resp.size(), 0,
                reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+        registerInvalidMessage(playerToken, players, rooms, sockfd, "INVALID_FORMAT");
         return;
     }
     if (exceedsLimit(name, 64)) {
@@ -581,6 +646,7 @@ void handleCreateRoom(
                            ";ERROR;INVALID_FORMAT;Room name too long\n";
         sendto(sockfd, resp.c_str(), resp.size(), 0,
                reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+        registerInvalidMessage(playerToken, players, rooms, sockfd, "INVALID_FORMAT");
         return;
     }
 
@@ -625,19 +691,24 @@ void handleCreateRoom(
 // Příklad: 5;JOIN_ROOM;1 -> 5;JOIN_ROOM_OK;room=1;players=1/2
 void handleJoinRoom(
     const Message& msg,
-    const std::string& clientKey,
+    const std::string& playerToken,
     RoomsMap& rooms,
-    const PlayersMap& players,
+    PlayersMap& players,
     int sockfd,
     const sockaddr_in& clientAddr,
     socklen_t clientLen,
     int turnTimeoutMs
 ) {
+    auto registerInvalid = [&](const std::string& code) {
+        registerInvalidMessage(playerToken, players, rooms, sockfd, code);
+    };
+
     if (msg.rawParams.size() < 1) {
         std::string resp = std::to_string(msg.id) +
                            ";ERROR;INVALID_FORMAT;Missing roomId\n";
         sendto(sockfd, resp.c_str(), resp.size(), 0,
                reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+        registerInvalid("INVALID_FORMAT");
         return;
     }
 
@@ -647,6 +718,7 @@ void handleJoinRoom(
                            ";ERROR;INVALID_FORMAT;roomId must be number\n";
         sendto(sockfd, resp.c_str(), resp.size(), 0,
                reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+        registerInvalid("INVALID_FORMAT");
         return;
     }
 
@@ -656,15 +728,17 @@ void handleJoinRoom(
                            ";ERROR;ROOM_NOT_FOUND\n";
         sendto(sockfd, resp.c_str(), resp.size(), 0,
                reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+        registerInvalid("ROOM_NOT_FOUND");
         return;
     }
 
-    auto itPlayer = players.find(clientKey);
+    auto itPlayer = players.find(playerToken);
     if (itPlayer == players.end()) {
         std::string resp = std::to_string(msg.id) +
                            ";ERROR;NOT_LOGGED_IN\n";
         sendto(sockfd, resp.c_str(), resp.size(), 0,
                reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+        registerInvalid("NOT_LOGGED_IN");
         return;
     }
 
@@ -687,9 +761,9 @@ void handleJoinRoom(
     }
 
     // přidáme klienta, pokud tam ještě není
-    if (std::find(room.playerKeys.begin(), room.playerKeys.end(), clientKey) ==
+    if (std::find(room.playerKeys.begin(), room.playerKeys.end(), playerToken) ==
         room.playerKeys.end()) {
-        room.playerKeys.push_back(clientKey);
+        room.playerKeys.push_back(playerToken);
     }
 
     // odpověď JOIN_ROOM_OK jen volajícímu klientovi
@@ -702,7 +776,7 @@ void handleJoinRoom(
            reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
 
     std::cout << "[INFO] JOIN room=" << room.id
-              << " key=" << clientKey
+              << " key=" << playerToken
               << " size=" << room.playerKeys.size() << "/" << ROOM_CAPACITY
               << " status=" << (room.status == RoomStatus::WAITING ? "WAITING" : "IN_GAME")
               << std::endl;
@@ -713,6 +787,7 @@ void handleJoinRoom(
         room.turn   = Turn::PLAYER1;
         room.board  = createInitialBoard();
         room.captureLock.reset();
+        room.remainingTurnMs = turnTimeoutMs;
         room.lastTurnAt = std::chrono::steady_clock::now();
 
         // každému hráči pošleme GAME_START (role WHITE/BLACK)
@@ -756,7 +831,7 @@ void handleJoinRoom(
 // Příklad: 6;MOVE;1;5;0;4;1 -> 6;GAME_STATE;room=1;turn=PLAYER2;board=...
 void handleMove(
     const Message& msg,
-    const std::string& clientKey,
+    const std::string& playerToken,
     RoomsMap& rooms,
     PlayersMap& players,
     int sockfd,
@@ -764,11 +839,16 @@ void handleMove(
     socklen_t clientLen,
     int turnTimeoutMs
 ) {
+    auto registerInvalid = [&](const std::string& code) {
+        registerInvalidMessage(playerToken, players, rooms, sockfd, code);
+    };
+
     if (msg.rawParams.size() < 5) {
         std::string resp = std::to_string(msg.id) +
                            ";ERROR;INVALID_FORMAT;Missing roomId/fromRow/fromCol/toRow/toCol\n";
         sendto(sockfd, resp.c_str(), resp.size(), 0,
                reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+        registerInvalid("INVALID_FORMAT");
         return;
     }
 
@@ -782,6 +862,7 @@ void handleMove(
                            ";ERROR;INVALID_FORMAT;Coordinates must be numbers\n";
         sendto(sockfd, resp.c_str(), resp.size(), 0,
                reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+        registerInvalid("INVALID_FORMAT");
         return;
     }
 
@@ -791,6 +872,7 @@ void handleMove(
                            ";ERROR;ROOM_NOT_FOUND\n";
         sendto(sockfd, resp.c_str(), resp.size(), 0,
                reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+        registerInvalid("ROOM_NOT_FOUND");
         return;
     }
 
@@ -801,26 +883,29 @@ void handleMove(
                            ";ERROR;ROOM_NOT_IN_GAME\n";
         sendto(sockfd, resp.c_str(), resp.size(), 0,
                reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+        registerInvalid("ROOM_NOT_IN_GAME");
         return;
     }
 
     // najdeme index hráče v room
-    auto itKey = std::find(room.playerKeys.begin(), room.playerKeys.end(), clientKey);
+    auto itKey = std::find(room.playerKeys.begin(), room.playerKeys.end(), playerToken);
     if (itKey == room.playerKeys.end()) {
         std::string resp = std::to_string(msg.id) +
                            ";ERROR;NOT_IN_ROOM\n";
         sendto(sockfd, resp.c_str(), resp.size(), 0,
                reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+        registerInvalid("NOT_IN_ROOM");
         return;
     }
 
     std::size_t playerIndex = static_cast<std::size_t>(itKey - room.playerKeys.begin());
-    auto itPlayerObj = players.find(clientKey);
+    auto itPlayerObj = players.find(playerToken);
     if (itPlayerObj == players.end()) {
         std::string resp = std::to_string(msg.id) +
                            ";ERROR;NOT_LOGGED_IN\n";
         sendto(sockfd, resp.c_str(), resp.size(), 0,
                reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+        registerInvalid("NOT_LOGGED_IN");
         return;
     }
     // deduplikace MOVE (ignoruj stejné nebo starší msg.id)
@@ -836,6 +921,16 @@ void handleMove(
                            ";ERROR;NOT_YOUR_TURN\n";
         sendto(sockfd, resp.c_str(), resp.size(), 0,
                reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+        registerInvalid("NOT_YOUR_TURN");
+        return;
+    }
+
+    if (roomHasPausedPlayer(room, players)) {
+        std::string resp = std::to_string(msg.id) +
+                           ";ERROR;GAME_PAUSED\n";
+        sendto(sockfd, resp.c_str(), resp.size(), 0,
+               reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+        registerInvalid("GAME_PAUSED");
         return;
     }
 
@@ -846,6 +941,7 @@ void handleMove(
                                ";ERROR;MUST_CONTINUE_CAPTURE\n";
             sendto(sockfd, resp.c_str(), resp.size(), 0,
                    reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+            registerInvalid("MUST_CONTINUE_CAPTURE");
             return;
         }
     }
@@ -858,6 +954,7 @@ void handleMove(
                            ";ERROR;OUT_OF_BOARD\n";
         sendto(sockfd, resp.c_str(), resp.size(), 0,
                reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+        registerInvalid("OUT_OF_BOARD");
         return;
     }
 
@@ -866,6 +963,7 @@ void handleMove(
                            ";ERROR;INVALID_SQUARE\n";
         sendto(sockfd, resp.c_str(), resp.size(), 0,
                reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+        registerInvalid("INVALID_SQUARE");
         return;
     }
 
@@ -877,6 +975,7 @@ void handleMove(
                            ";ERROR;NO_PIECE\n";
         sendto(sockfd, resp.c_str(), resp.size(), 0,
                reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+        registerInvalid("NO_PIECE");
         return;
     }
 
@@ -889,6 +988,7 @@ void handleMove(
                            ";ERROR;NOT_YOUR_PIECE\n";
         sendto(sockfd, resp.c_str(), resp.size(), 0,
                reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+        registerInvalid("NOT_YOUR_PIECE");
         return;
     }
 
@@ -897,6 +997,7 @@ void handleMove(
                            ";ERROR;DEST_NOT_EMPTY\n";
         sendto(sockfd, resp.c_str(), resp.size(), 0,
                reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+        registerInvalid("DEST_NOT_EMPTY");
         return;
     }
 
@@ -908,6 +1009,7 @@ void handleMove(
                            ";ERROR;INVALID_MOVE\n";
         sendto(sockfd, resp.c_str(), resp.size(), 0,
                reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+        registerInvalid("INVALID_MOVE");
         return;
     }
 
@@ -949,6 +1051,7 @@ void handleMove(
                                ";ERROR;INVALID_MOVE\n";
             sendto(sockfd, resp.c_str(), resp.size(), 0,
                    reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+            registerInvalid("INVALID_MOVE");
             return;
         }
 
@@ -958,6 +1061,7 @@ void handleMove(
                                ";ERROR;MUST_CAPTURE\n";
             sendto(sockfd, resp.c_str(), resp.size(), 0,
                    reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+            registerInvalid("MUST_CAPTURE");
             return;
         }
     } else {
@@ -974,6 +1078,7 @@ void handleMove(
                                ";ERROR;INVALID_MOVE\n";
             sendto(sockfd, resp.c_str(), resp.size(), 0,
                    reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+            registerInvalid("INVALID_MOVE");
             return;
         }
 
@@ -982,6 +1087,7 @@ void handleMove(
                                ";ERROR;INVALID_DIRECTION\n";
             sendto(sockfd, resp.c_str(), resp.size(), 0,
                    reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+            registerInvalid("INVALID_DIRECTION");
             return;
         }
 
@@ -990,6 +1096,7 @@ void handleMove(
                                ";ERROR;MUST_CAPTURE\n";
             sendto(sockfd, resp.c_str(), resp.size(), 0,
                    reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+            registerInvalid("MUST_CAPTURE");
             return;
         }
 
@@ -1003,6 +1110,7 @@ void handleMove(
                                    ";ERROR;NO_OPPONENT_TO_CAPTURE\n";
                 sendto(sockfd, resp.c_str(), resp.size(), 0,
                        reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+                registerInvalid("NO_OPPONENT_TO_CAPTURE");
                 return;
             }
             isCapture = true;
@@ -1052,6 +1160,7 @@ void handleMove(
         room.captureLock.reset();
         room.turn = (room.turn == Turn::PLAYER1) ? Turn::PLAYER2 : Turn::PLAYER1;
     }
+    room.remainingTurnMs = turnTimeoutMs;
     room.lastTurnAt = std::chrono::steady_clock::now();
 
     // vyhodnocení konce hry
@@ -1078,18 +1187,23 @@ void handleMove(
 // nebo:             ID;ERROR;INVALID_FORMAT|ROOM_NOT_FOUND|ROOM_NOT_IN_GAME|NOT_LOGGED_IN|NOT_IN_ROOM|NOT_YOUR_PIECE|NO_PIECE|MUST_CONTINUE_CAPTURE
 void handleLegalMoves(
     const Message& msg,
-    const std::string& clientKey,
+    const std::string& playerToken,
     RoomsMap& rooms,
-    const PlayersMap& players,
+    PlayersMap& players,
     int sockfd,
     const sockaddr_in& clientAddr,
     socklen_t clientLen
 ) {
+    auto registerInvalid = [&](const std::string& code) {
+        registerInvalidMessage(playerToken, players, rooms, sockfd, code);
+    };
+
     if (msg.rawParams.size() < 3) {
         std::string resp = std::to_string(msg.id) +
                            ";ERROR;INVALID_FORMAT;Missing roomId/row/col\n";
         sendto(sockfd, resp.c_str(), resp.size(), 0,
                reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+        registerInvalid("INVALID_FORMAT");
         return;
     }
 
@@ -1101,6 +1215,7 @@ void handleLegalMoves(
                            ";ERROR;INVALID_FORMAT;roomId/row/col must be numbers\n";
         sendto(sockfd, resp.c_str(), resp.size(), 0,
                reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+        registerInvalid("INVALID_FORMAT");
         return;
     }
 
@@ -1110,6 +1225,7 @@ void handleLegalMoves(
                            ";ERROR;ROOM_NOT_FOUND\n";
         sendto(sockfd, resp.c_str(), resp.size(), 0,
                reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+        registerInvalid("ROOM_NOT_FOUND");
         return;
     }
     Room& room = itRoom->second;
@@ -1119,29 +1235,41 @@ void handleLegalMoves(
                            ";ERROR;ROOM_NOT_IN_GAME\n";
         sendto(sockfd, resp.c_str(), resp.size(), 0,
                reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+        registerInvalid("ROOM_NOT_IN_GAME");
         return;
     }
 
-    auto itPlayer = players.find(clientKey);
+    auto itPlayer = players.find(playerToken);
     if (itPlayer == players.end()) {
         std::string resp = std::to_string(msg.id) +
                            ";ERROR;NOT_LOGGED_IN\n";
         sendto(sockfd, resp.c_str(), resp.size(), 0,
                reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+        registerInvalid("NOT_LOGGED_IN");
         return;
     }
 
-    auto itKey = std::find(room.playerKeys.begin(), room.playerKeys.end(), clientKey);
+    auto itKey = std::find(room.playerKeys.begin(), room.playerKeys.end(), playerToken);
     if (itKey == room.playerKeys.end()) {
         std::string resp = std::to_string(msg.id) +
                            ";ERROR;NOT_IN_ROOM\n";
         sendto(sockfd, resp.c_str(), resp.size(), 0,
                reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+        registerInvalid("NOT_IN_ROOM");
         return;
     }
 
     std::size_t playerIndex = static_cast<std::size_t>(itKey - room.playerKeys.begin());
     bool isWhitePlayer = playerIndex == 0;
+
+    if (roomHasPausedPlayer(room, players)) {
+        std::string resp = std::to_string(msg.id) +
+                           ";ERROR;GAME_PAUSED\n";
+        sendto(sockfd, resp.c_str(), resp.size(), 0,
+               reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+        registerInvalid("GAME_PAUSED");
+        return;
+    }
 
     auto inRange = [](int v) { return v >= 0 && v < BOARD_SIZE; };
     if (!inRange(row) || !inRange(col) || !isDarkSquare(row, col)) {
@@ -1149,6 +1277,7 @@ void handleLegalMoves(
                            ";ERROR;INVALID_SQUARE\n";
         sendto(sockfd, resp.c_str(), resp.size(), 0,
                reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+        registerInvalid("INVALID_SQUARE");
         return;
     }
 
@@ -1159,6 +1288,7 @@ void handleLegalMoves(
                                ";ERROR;MUST_CONTINUE_CAPTURE\n";
             sendto(sockfd, resp.c_str(), resp.size(), 0,
                    reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+            registerInvalid("MUST_CONTINUE_CAPTURE");
             return;
         }
     }
@@ -1169,6 +1299,7 @@ void handleLegalMoves(
                            ";ERROR;NO_PIECE\n";
         sendto(sockfd, resp.c_str(), resp.size(), 0,
                reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+        registerInvalid("NO_PIECE");
         return;
     }
 
@@ -1178,6 +1309,7 @@ void handleLegalMoves(
                            ";ERROR;NOT_YOUR_PIECE\n";
         sendto(sockfd, resp.c_str(), resp.size(), 0,
                reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+        registerInvalid("NOT_YOUR_PIECE");
         return;
     }
 
@@ -1237,19 +1369,24 @@ void handleLegalMoves(
 // Příklad: 7;LEAVE_ROOM;1 -> 7;LEAVE_ROOM_OK;room=1
 void handleLeaveRoom(
     const Message& msg,
-    const std::string& clientKey,
+    const std::string& playerToken,
     RoomsMap& rooms,
-    const PlayersMap& players,
+    PlayersMap& players,
     int sockfd,
     const sockaddr_in& clientAddr,
     socklen_t clientLen,
     int reconnectWindowMs
 ) {
+    auto registerInvalid = [&](const std::string& code) {
+        registerInvalidMessage(playerToken, players, rooms, sockfd, code);
+    };
+
     if (msg.rawParams.size() < 1) {
         std::string resp = std::to_string(msg.id) +
                             ";ERROR;INVALID_FORMAT;Missing roomId\n";
         sendto(sockfd, resp.c_str(), resp.size(), 0,
                 reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+        registerInvalid("INVALID_FORMAT");
         return;
     }
 
@@ -1259,6 +1396,7 @@ void handleLeaveRoom(
                             ";ERROR;INVALID_FORMAT;roomId must be number\n";
         sendto(sockfd, resp.c_str(), resp.size(), 0,
                 reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+        registerInvalid("INVALID_FORMAT");
         return;
     }
 
@@ -1268,27 +1406,30 @@ void handleLeaveRoom(
             ";ERROR;ROOM_NOT_FOUND\n";
         sendto(sockfd, resp.c_str(), resp.size(), 0,
                reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+        registerInvalid("ROOM_NOT_FOUND");
         return;
     }
 
-    auto itPlayer = players.find(clientKey);
+    auto itPlayer = players.find(playerToken);
     if (itPlayer == players.end()) {
         std::string resp = std::to_string(msg.id) +
             ";ERROR;NOT_LOGGED_IN\n";
         sendto(sockfd, resp.c_str(), resp.size(), 0,
                 reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+        registerInvalid("NOT_LOGGED_IN");
         return;
     }
 
     Room& room = itRoom->second;
 
     // najít hráče
-    auto itKey = std::find(room.playerKeys.begin(), room.playerKeys.end(), clientKey);
+    auto itKey = std::find(room.playerKeys.begin(), room.playerKeys.end(), playerToken);
     if (itKey == room.playerKeys.end()) {
         std::string resp = std::to_string(msg.id) +
                           ";ERROR;NOT_IN_ROOM\n";
         sendto(sockfd, resp.c_str(), resp.size(), 0,
                reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+        registerInvalid("NOT_IN_ROOM");
         return;
     }
 
@@ -1303,7 +1444,7 @@ void handleLeaveRoom(
             reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
 
     std::cout << "[INFO] LEAVE room=" << room.id
-              << " key=" << clientKey << std::endl;
+              << " key=" << playerToken << std::endl;
 
     // clean-up prázdné room
 
@@ -1336,14 +1477,16 @@ void checkTimeouts(
     int turnTimeoutMs,
     int sockfd,
     int reconnectWindowMs,
-    std::map<std::string, std::string>& tokenToKey
+    EndpointMap& endpointToToken
 ) {
     auto now = std::chrono::steady_clock::now();
 
     for (auto& [key, player] : players) {
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - player.lastSeen).count();
-        if (elapsed > heartbeatTimeoutMs) {
-            std::cout << "Player timeout: " << key << " nick=" << player.nick << std::endl;
+        if (elapsed > heartbeatTimeoutMs && !player.paused) {
+            std::cout << "Player timeout: " << player.nick
+                      << " key=" << key
+                      << " addr=" << addrToKey(player.addr) << std::endl;
             player.connected = false;
             // mark pause window
             player.paused = true;
@@ -1354,7 +1497,7 @@ void checkTimeouts(
                 if (it == room.playerKeys.end()) continue;
 
                 if (room.status == RoomStatus::IN_GAME) {
-                    pauseRoom(room, players, sockfd, reconnectWindowMs, key);
+                    pauseRoom(room, players, sockfd, reconnectWindowMs, turnTimeoutMs, key);
                     std::cout << "[WARN] TIMEOUT_HEARTBEAT room=" << room.id
                               << " key=" << key << " paused" << std::endl;
                 } else {
@@ -1400,14 +1543,34 @@ void checkTimeouts(
                     auto it = std::find(room.playerKeys.begin(), room.playerKeys.end(), key);
                     if (it != room.playerKeys.end()) {
                         if (!room.playerKeys.empty() && room.status == RoomStatus::IN_GAME) {
-                            sendGameEnd(0, room, players, sockfd, "OPPONENT_TIMEOUT");
+                            std::string winnerOverride = "NONE";
+                            if (room.playerKeys.size() >= 2) {
+                                bool timedOutWasWhite = (it == room.playerKeys.begin());
+                                const std::string& opponentKey = timedOutWasWhite ? room.playerKeys[1] : room.playerKeys[0];
+                                auto pitOpp = players.find(opponentKey);
+                                if (pitOpp != players.end()) {
+                                    const Player& opponent = pitOpp->second;
+                                    if (!opponent.paused ||
+                                        opponent.resumeDeadline == std::chrono::steady_clock::time_point{} ||
+                                        opponent.resumeDeadline > now) {
+                                        winnerOverride = timedOutWasWhite ? "BLACK" : "WHITE";
+                                    }
+                                }
+                            }
+                            sendGameEnd(0, room, players, sockfd, "OPPONENT_TIMEOUT", winnerOverride);
                         }
                         resetRoom(room);
                     }
                 }
                 player.paused = false;
                 player.resumeDeadline = std::chrono::steady_clock::time_point{};
-                tokenToKey.erase(player.token);
+                for (auto it = endpointToToken.begin(); it != endpointToToken.end();) {
+                    if (it->second == player.token) {
+                        it = endpointToToken.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
                 toErase.push_back(key);
             }
         }
@@ -1448,15 +1611,15 @@ void checkTimeouts(
 
 void handleBye(
     const Message& msg,
-    const std::string& clientKey,
+    const std::string& playerToken,
     PlayersMap& players,
     RoomsMap& rooms,
-    std::map<std::string, std::string>& tokenToKey,
+    EndpointMap& endpointToToken,
     int sockfd,
     const sockaddr_in& clientAddr,
     socklen_t clientLen
 ) {
-    auto pit = players.find(clientKey);
+    auto pit = players.find(playerToken);
     if (pit == players.end()) {
         std::string resp = std::to_string(msg.id) + ";BYE_OK\n";
         sendto(sockfd, resp.c_str(), resp.size(), 0,
@@ -1468,7 +1631,7 @@ void handleBye(
 
     // odstranění z místností a notifikace soupeře
     for (auto& [roomId, room] : rooms) {
-        auto it = std::find(room.playerKeys.begin(), room.playerKeys.end(), clientKey);
+        auto it = std::find(room.playerKeys.begin(), room.playerKeys.end(), playerToken);
         if (it != room.playerKeys.end()) {
             if (!room.playerKeys.empty() && room.status == RoomStatus::IN_GAME) {
                 sendGameEnd(msg.id, room, players, sockfd, "OPPONENT_LEFT");
@@ -1477,11 +1640,17 @@ void handleBye(
         }
     }
 
-    tokenToKey.erase(player.token);
-    players.erase(clientKey);
+    for (auto it = endpointToToken.begin(); it != endpointToToken.end();) {
+        if (it->second == player.token) {
+            it = endpointToToken.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    players.erase(playerToken);
 
     std::string resp = std::to_string(msg.id) + ";BYE_OK\n";
     sendto(sockfd, resp.c_str(), resp.size(), 0,
            reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
-    std::cout << "[INFO] BYE key=" << clientKey << " - removed player" << std::endl;
+    std::cout << "[INFO] BYE key=" << playerToken << " - removed player" << std::endl;
 }

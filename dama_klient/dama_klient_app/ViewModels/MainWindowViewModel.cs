@@ -11,11 +11,12 @@ public class MainWindowViewModel : ViewModelBase
 {
     private ViewModelBase _currentViewModel;
     private string _nickname = string.Empty;
+    private string _loginNotice = string.Empty;
 
     public MainWindowViewModel(IGameClient gameClient)
     {
         GameClient = gameClient;
-        _currentViewModel = new LoginViewModel(gameClient, OnLoginCompleted);
+        _currentViewModel = new LoginViewModel(gameClient, OnLoginCompleted, _loginNotice);
     }
 
     public IGameClient GameClient { get; }
@@ -34,10 +35,12 @@ public class MainWindowViewModel : ViewModelBase
     }
 
     // Odhlášení zpět na login.
-    private void ReturnToLogin()
+    private void ReturnToLogin(string? notice = null)
     {
         _nickname = string.Empty;
-        CurrentViewModel = new LoginViewModel(GameClient, OnLoginCompleted);
+        _loginNotice = notice ?? string.Empty;
+        CurrentViewModel = new LoginViewModel(GameClient, OnLoginCompleted, _loginNotice);
+        _loginNotice = string.Empty;
     }
 
     // Přepnutí do lobby.
@@ -49,6 +52,6 @@ public class MainWindowViewModel : ViewModelBase
     // Zahájení hry v dané místnosti.
     private void StartGame(RoomInfo room)
     {
-        CurrentViewModel = new GameViewModel(GameClient, room, _nickname, ShowLobby);
+        CurrentViewModel = new GameViewModel(GameClient, room, _nickname, ShowLobby, ReturnToLogin);
     }
 }

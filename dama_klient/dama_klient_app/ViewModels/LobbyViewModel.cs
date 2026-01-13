@@ -7,6 +7,7 @@ using System.Windows.Input;
 using dama_klient_app.Models;
 using dama_klient_app.Services;
 using Avalonia.Threading;
+using Avalonia.Media;
 
 namespace dama_klient_app.ViewModels;
 
@@ -15,13 +16,17 @@ namespace dama_klient_app.ViewModels;
 /// </summary>
 public class LobbyViewModel : ViewModelBase
 {
-    private readonly Action _backToLogin;
+    private readonly Action<string?> _backToLogin;
     private readonly Action<RoomInfo> _startGame;
     private RoomInfo? _selectedRoom;
     private string? _statusMessage;
     private bool _isBusy;
+    private bool _isLoadingRooms;
+    private string _serverStatusText = "Server neznámý";
+    private IBrush _serverStatusBrush = Brushes.Gray;
+    private CancellationTokenSource? _serverOfflineCts;
 
-    public LobbyViewModel(IGameClient gameClient, string nickname, Action backToLogin, Action<RoomInfo> startGame)
+    public LobbyViewModel(IGameClient gameClient, string nickname, Action<string?> backToLogin, Action<RoomInfo> startGame)
     {
         GameClient = gameClient;
         Nickname = nickname;
@@ -36,6 +41,9 @@ public class LobbyViewModel : ViewModelBase
 
         GameClient.LobbyUpdated += OnLobbyUpdated;
         GameClient.Disconnected += OnDisconnected;
+        GameClient.TokenInvalidated += OnTokenInvalidated;
+        GameClient.ServerStatusChanged += OnServerStatusChanged;
+        UpdateServerStatus(GameClient.ServerStatus);
         _ = LoadRoomsAsync();
         AppServices.Logger.Info($"Entered lobby as '{nickname}'.");
     }
@@ -85,6 +93,18 @@ public class LobbyViewModel : ViewModelBase
 
     public ICommand LogoutCommand { get; }
 
+    public string ServerStatusText
+    {
+        get => _serverStatusText;
+        private set => SetField(ref _serverStatusText, value);
+    }
+
+    public IBrush ServerStatusBrush
+    {
+        get => _serverStatusBrush;
+        private set => SetField(ref _serverStatusBrush, value);
+    }
+
     private void RaiseCommandStates()
     {
         Dispatcher.UIThread.Post(() =>
@@ -99,6 +119,12 @@ public class LobbyViewModel : ViewModelBase
     // Načte seznam místností pomocí LIST_ROOMS.
     private async Task LoadRoomsAsync()
     {
+        if (_isLoadingRooms)
+        {
+            return;
+        }
+
+        _isLoadingRooms = true;
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(4));
         try
         {
@@ -134,6 +160,7 @@ public class LobbyViewModel : ViewModelBase
         finally
         {
             IsBusy = false;
+            _isLoadingRooms = false;
             AppServices.Logger.Info($"LIST_ROOMS end (IsBusy={IsBusy})");
         }
     }
@@ -176,6 +203,10 @@ public class LobbyViewModel : ViewModelBase
             await GameClient.JoinRoomAsync(SelectedRoom.Id);
             StatusMessage = $"Joined {SelectedRoom.Name}";
             GameClient.LobbyUpdated -= OnLobbyUpdated;
+            GameClient.Disconnected -= OnDisconnected;
+            GameClient.TokenInvalidated -= OnTokenInvalidated;
+            GameClient.ServerStatusChanged -= OnServerStatusChanged;
+            StopServerOfflineCountdown();
             _startGame(SelectedRoom);
             AppServices.Logger.Info($"Joined room {SelectedRoom.Id} ({SelectedRoom.Name}).");
         }
@@ -191,12 +222,22 @@ public class LobbyViewModel : ViewModelBase
     }
 
     // Odhlášení zpět na login (bez volání serveru – server nezná logout).
-    private Task LogoutAsync()
+    private async Task LogoutAsync()
     {
+        try
+        {
+            await GameClient.SendByeAsync();
+        }
+        catch
+        {
+            // best-effort
+        }
         GameClient.LobbyUpdated -= OnLobbyUpdated;
         GameClient.Disconnected -= OnDisconnected;
-        _backToLogin();
-        return Task.CompletedTask;
+        GameClient.TokenInvalidated -= OnTokenInvalidated;
+        GameClient.ServerStatusChanged -= OnServerStatusChanged;
+        StopServerOfflineCountdown();
+        _backToLogin(null);
     }
 
     // Aktualizace Rooms při pushu z klienta (ROOM/ROOMS_EMPTY po LIST_ROOMS).
@@ -217,12 +258,106 @@ public class LobbyViewModel : ViewModelBase
 
     private void OnDisconnected(object? sender, EventArgs e)
     {
+        Dispatcher.UIThread.Post(HandleServerOffline);
+    }
+
+    private void OnTokenInvalidated(object? sender, EventArgs e)
+    {
         Dispatcher.UIThread.Post(() =>
         {
-            StatusMessage = "Spojení se serverem bylo ztraceno.";
+            StatusMessage = "Přihlášení vypršelo, přihlaste se znovu.";
             GameClient.LobbyUpdated -= OnLobbyUpdated;
             GameClient.Disconnected -= OnDisconnected;
-            _backToLogin();
+            GameClient.TokenInvalidated -= OnTokenInvalidated;
+            GameClient.ServerStatusChanged -= OnServerStatusChanged;
+            StopServerOfflineCountdown();
+            _backToLogin(null);
         });
+    }
+
+    private void OnServerStatusChanged(object? sender, ServerStatus status)
+    {
+        Dispatcher.UIThread.Post(() => HandleServerStatus(status));
+    }
+
+    private void HandleServerStatus(ServerStatus status)
+    {
+        UpdateServerStatus(status);
+        if (status == ServerStatus.Offline)
+        {
+            HandleServerOffline();
+            return;
+        }
+
+        StopServerOfflineCountdown();
+        if (!_isLoadingRooms)
+        {
+            _ = LoadRoomsAsync();
+        }
+    }
+
+    private void HandleServerOffline()
+    {
+        StartServerOfflineCountdown();
+    }
+
+    private void StartServerOfflineCountdown()
+    {
+        if (_serverOfflineCts != null)
+        {
+            return;
+        }
+
+        _serverOfflineCts = new CancellationTokenSource();
+        var token = _serverOfflineCts.Token;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(20), token);
+            }
+            catch (TaskCanceledException)
+            {
+                return;
+            }
+
+            Dispatcher.UIThread.Post(() =>
+            {
+                GameClient.LobbyUpdated -= OnLobbyUpdated;
+                GameClient.Disconnected -= OnDisconnected;
+                GameClient.TokenInvalidated -= OnTokenInvalidated;
+                GameClient.ServerStatusChanged -= OnServerStatusChanged;
+                _backToLogin("Spojení se serverem bylo přerušeno, byli jste odhlášeni.");
+            });
+        }, token);
+    }
+
+    private void StopServerOfflineCountdown()
+    {
+        if (_serverOfflineCts == null)
+        {
+            return;
+        }
+        _serverOfflineCts.Cancel();
+        _serverOfflineCts = null;
+    }
+
+    private void UpdateServerStatus(ServerStatus status)
+    {
+        switch (status)
+        {
+            case ServerStatus.Online:
+                ServerStatusText = "Server online";
+                ServerStatusBrush = Brushes.ForestGreen;
+                break;
+            case ServerStatus.Offline:
+                ServerStatusText = "Spojení přerušeno";
+                ServerStatusBrush = Brushes.IndianRed;
+                break;
+            default:
+                ServerStatusText = "Server neznámý";
+                ServerStatusBrush = Brushes.Gray;
+                break;
+        }
     }
 }

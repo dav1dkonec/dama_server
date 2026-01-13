@@ -33,6 +33,17 @@
                     HorizontalAlignment="Stretch"
                     HorizontalContentAlignment="Center"/>
 
+            <StackPanel Orientation="Horizontal"
+                        Spacing="6"
+                        HorizontalAlignment="Center">
+                <Ellipse Width="8"
+                         Height="8"
+                         Fill="{Binding ServerStatusBrush}"
+                         VerticalAlignment="Center" />
+                <TextBlock Text="{Binding ServerStatusText}"
+                           Foreground="Gray" />
+            </StackPanel>
+
             <TextBlock Text="{Binding ErrorMessage}"
                        Foreground="DarkRed"
                        TextWrapping="Wrap"

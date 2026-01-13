@@ -27,6 +27,8 @@ struct Player {
     std::chrono::steady_clock::time_point tokenExpires{}; // set when paused
     bool paused = false;
     std::chrono::steady_clock::time_point resumeDeadline{};
+    int invalidCount = 0;
+    std::chrono::steady_clock::time_point invalidWindowStart{};
 };
 
 // Stav místnosti
@@ -55,11 +57,12 @@ struct Room {
     int id = 0;
     std::string name;
     RoomStatus status = RoomStatus::WAITING;
-    std::vector<std::string> playerKeys; // identifikace hráčů podle clientKey ("ip:port")
+    std::vector<std::string> playerKeys; // identifikace hráčů podle tokenu
     Turn turn = Turn::NONE;
     std::string board; // hrací deska (8x8)
     std::optional<std::pair<int, int>> captureLock; // position of piece that must continue capturing
     std::chrono::steady_clock::time_point lastTurnAt{};
+    int remainingTurnMs = -1; // ulozeny zbyvajici cas tahu pri pauze
 };
 
 struct ServerLimits {
