@@ -1474,6 +1474,7 @@ void checkTimeouts(
     PlayersMap& players,
     RoomsMap& rooms,
     int heartbeatTimeoutMs,
+    int pauseThresholdMs,
     int turnTimeoutMs,
     int sockfd,
     int reconnectWindowMs,
@@ -1506,6 +1507,33 @@ void checkTimeouts(
                         resetRoom(room);
                     }
                 }
+            }
+        }
+    }
+
+    if (pauseThresholdMs > 0) {
+        for (auto& [roomId, room] : rooms) {
+            if (room.status != RoomStatus::IN_GAME) continue;
+            if (room.lastTurnAt == std::chrono::steady_clock::time_point{}) continue;
+            if (room.playerKeys.empty()) continue;
+
+            bool anyPlayer = false;
+            bool allStale = true;
+            for (const auto& key : room.playerKeys) {
+                auto pit = players.find(key);
+                if (pit == players.end()) continue;
+                anyPlayer = true;
+                auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - pit->second.lastSeen).count();
+                if (elapsed <= pauseThresholdMs) {
+                    allStale = false;
+                    break;
+                }
+            }
+
+            if (anyPlayer && allStale) {
+                auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - room.lastTurnAt).count();
+                room.remainingTurnMs = std::max(0, turnTimeoutMs - static_cast<int>(elapsed));
+                room.lastTurnAt = std::chrono::steady_clock::time_point{}; // freeze timer during server outage
             }
         }
     }

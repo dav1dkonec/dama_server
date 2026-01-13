@@ -363,7 +363,8 @@ int main(int argc, char* argv[]) {
         if (std::chrono::duration_cast<std::chrono::milliseconds>(
                 now - lastTimeoutCheck).count() > timeoutCheckIntervalMs) {
             int effectiveHeartbeatMs = timeoutMs * timeoutGrace;
-            checkTimeouts(players, rooms, effectiveHeartbeatMs, turnTimeoutMs, sockfd, reconnectWindowMs, endpointToToken);
+            int pauseThresholdMs = std::min(12000, effectiveHeartbeatMs);
+            checkTimeouts(players, rooms, effectiveHeartbeatMs, pauseThresholdMs, turnTimeoutMs, sockfd, reconnectWindowMs, endpointToToken);
             lastTimeoutCheck = now;
         }
 

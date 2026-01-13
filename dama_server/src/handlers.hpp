@@ -108,6 +108,7 @@ void checkTimeouts(
     PlayersMap& players,
     RoomsMap& rooms,
     int heartbeatTimeoutMs,
+    int pauseThresholdMs,
     int turnTimeoutMs,
     int sockfd,
     int reconnectWindowMs,
