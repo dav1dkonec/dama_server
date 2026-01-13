@@ -102,14 +102,15 @@ public class GameClient : IGameClient, IAsyncDisposable
             {
                 return;
             }
+
+            _udpClient.Connect(_host, _port);
             _isConnected = true;
+            _lastReceiveAt = DateTimeOffset.UtcNow;
+            _disconnectNotified = 0;
+            _receiveLoopTask = Task.Run(() => ReceiveLoopAsync(_cts.Token));
+            _heartbeatTask = Task.Run(() => HeartbeatLoopAsync(_cts.Token));
         }
 
-        _udpClient.Connect(_host, _port);
-        _lastReceiveAt = DateTimeOffset.UtcNow;
-        _disconnectNotified = 0;
-        _receiveLoopTask = Task.Run(() => ReceiveLoopAsync(_cts.Token));
-        _heartbeatTask = Task.Run(() => HeartbeatLoopAsync(_cts.Token));
         await Task.CompletedTask;
     }
 
