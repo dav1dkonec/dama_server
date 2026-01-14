@@ -12,7 +12,7 @@ Messages end with `\n`, format `ID;TYPE;param;key=value;...`.
 - `ID;JOIN_ROOM;<roomId>` → `ID;JOIN_ROOM_OK;room=<roomId>;players=<n>/<2>` or `ERROR;ROOM_NOT_FOUND|NOT_LOGGED_IN|ROOM_FULL`.
 
 ## Game start
-- When room fills: each player gets `ID;GAME_START;room=<roomId>;you=<WHITE|BLACK>`.
+- When room fills: each player gets `ID;GAME_START;room=<roomId>;you=<WHITE|BLACK>;opponent=<nick>`.
 - Immediately after: `ID;GAME_STATE;room=<roomId>;turn=<PLAYER1|PLAYER2|NONE>;board=<64 chars>`.
 
 ## Moves
@@ -37,7 +37,7 @@ Messages end with `\n`, format `ID;TYPE;param;key=value;...`.
 - Ping: `2;PING` → `2;PONG`
 - Create: `3;CREATE_ROOM;MyRoom` → `3;CREATE_ROOM_OK;room=1`
 - Join: `4;JOIN_ROOM;1` → `4;JOIN_ROOM_OK;room=1;players=1/2`
-- Start: `4;GAME_START;room=1;you=WHITE`, `4;GAME_STATE;room=1;turn=PLAYER1;board=...`
+- Start: `4;GAME_START;room=1;you=WHITE;opponent=Bob`, `4;GAME_STATE;room=1;turn=PLAYER1;board=...`
 - Move: `5;MOVE;1;5;0;4;1` → if valid: `5;GAME_STATE;room=1;turn=PLAYER2;board=...`
 - Legal moves: `6;LEGAL_MOVES;1;5;0` → `6;LEGAL_MOVES;room=1;from=5,0;to=4,1;mustCapture=0`
 - Leave: `6;LEAVE_ROOM;1` → `6;LEAVE_ROOM_OK;room=1`

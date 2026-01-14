@@ -801,10 +801,23 @@ void handleJoinRoom(
             socklen_t pLen = sizeof(pAddr);
 
             std::string role = (i == 0) ? "WHITE" : "BLACK";
+            std::string opponentNick;
+            if (ROOM_CAPACITY == 2 && room.playerKeys.size() >= 2) {
+                std::size_t oppIndex = (i == 0) ? 1 : 0;
+                const std::string& oppKey = room.playerKeys[oppIndex];
+                auto oppIt = players.find(oppKey);
+                if (oppIt != players.end()) {
+                    opponentNick = oppIt->second.nick;
+                }
+            }
 
             std::string startMsg = std::to_string(msg.id) +
                                    ";GAME_START;room=" + std::to_string(room.id) +
-                                   ";you=" + role + "\n";
+                                   ";you=" + role;
+            if (!opponentNick.empty()) {
+                startMsg += ";opponent=" + opponentNick;
+            }
+            startMsg += "\n";
 
             sendto(sockfd, startMsg.c_str(), startMsg.size(), 0,
                    reinterpret_cast<const sockaddr*>(&pAddr), pLen);

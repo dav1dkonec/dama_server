@@ -358,6 +358,10 @@ public class GameViewModel : ViewModelBase
         ClearSelection();
         _awaitingCaptureChain = false;
         _lastMoveTarget = null;
+        if (!string.IsNullOrWhiteSpace(info.OpponentName))
+        {
+            OpponentName = info.OpponentName;
+        }
         PlayerColor = info.Role;
         _isFinished = false;
         Dispatcher.UIThread.Post(() =>
@@ -545,11 +549,21 @@ public class GameViewModel : ViewModelBase
             return "Čeká se na data";
         }
 
+        string OpponentLabel()
+        {
+            if (string.IsNullOrWhiteSpace(OpponentName) ||
+                OpponentName.Equals("Soupeř", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Soupeř";
+            }
+            return $"Soupeř - {OpponentName}";
+        }
+
         return turn switch
         {
             "NONE" => "Nikdo",
-            "PLAYER1" => PlayerColor.Equals("WHITE", StringComparison.OrdinalIgnoreCase) ? "Ty" : "Soupeř",
-            "PLAYER2" => PlayerColor.Equals("BLACK", StringComparison.OrdinalIgnoreCase) ? "Ty" : "Soupeř",
+            "PLAYER1" => PlayerColor.Equals("WHITE", StringComparison.OrdinalIgnoreCase) ? "Ty" : OpponentLabel(),
+            "PLAYER2" => PlayerColor.Equals("BLACK", StringComparison.OrdinalIgnoreCase) ? "Ty" : OpponentLabel(),
             _ => "Neznámý"
         };
     }

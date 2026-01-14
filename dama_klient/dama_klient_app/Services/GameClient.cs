@@ -462,7 +462,8 @@ public class GameClient : IGameClient, IAsyncDisposable
                     {
                         SetPhase(ClientPhase.InGame, roomId);
                     }
-                    var start = new GameStartInfo(roomId, role);
+                    msg.Params.TryGetValue("opponent", out var opponent);
+                    var start = new GameStartInfo(roomId, role, opponent ?? string.Empty);
                     _lastGameStarts[roomId] = start;
                     GameStarted?.Invoke(this, start);
                 }
