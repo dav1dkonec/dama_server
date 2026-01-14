@@ -273,6 +273,16 @@ public class GameClient : IGameClient, IAsyncDisposable
         }
     }
 
+    public void ClearRoomCache(int roomId)
+    {
+        _lastGameStarts.TryRemove(roomId, out _);
+        _lastGameStates.TryRemove(roomId, out _);
+        if (_activeRoomId.HasValue && _activeRoomId.Value == roomId)
+        {
+            SetPhase(ClientPhase.Lobby);
+        }
+    }
+
     public async Task SendMoveAsync(Move move, CancellationToken cancellationToken = default)
     {
         // MOVE → server odpoví ERROR nebo pošle GAME_STATE/GAME_END push všem v místnosti; držíme pending kvůli případnému ERROR.

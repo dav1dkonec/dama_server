@@ -247,6 +247,13 @@ public class GameViewModel : ViewModelBase
         {
             // Chyba se neřeší – server je autoritativní, UI jen opouští obrazovku.
         }
+        finally
+        {
+            if (_roomId > 0)
+            {
+                GameClient.ClearRoomCache(_roomId);
+            }
+        }
 
         StopReconnectLoop();
         Unsubscribe();
