@@ -200,14 +200,17 @@ public class LobbyViewModel : ViewModelBase
         {
             IsBusy = true;
             StatusMessage = $"Joining {SelectedRoom.Name}...";
-            await GameClient.JoinRoomAsync(SelectedRoom.Id);
+            var joinedCount = await GameClient.JoinRoomAsync(SelectedRoom.Id);
             StatusMessage = $"Joined {SelectedRoom.Name}";
             GameClient.LobbyUpdated -= OnLobbyUpdated;
             GameClient.Disconnected -= OnDisconnected;
             GameClient.TokenInvalidated -= OnTokenInvalidated;
             GameClient.ServerStatusChanged -= OnServerStatusChanged;
             StopServerOfflineCountdown();
-            _startGame(SelectedRoom);
+            var roomForGame = joinedCount >= 0
+                ? new RoomInfo(SelectedRoom.Id, SelectedRoom.Name, joinedCount, SelectedRoom.Capacity)
+                : SelectedRoom;
+            _startGame(roomForGame);
             AppServices.Logger.Info($"Joined room {SelectedRoom.Id} ({SelectedRoom.Name}).");
         }
         catch (Exception ex)

@@ -224,7 +224,7 @@ public class GameClient : IGameClient, IAsyncDisposable
         return room;
     }
 
-    public async Task JoinRoomAsync(string roomId, CancellationToken cancellationToken = default)
+    public async Task<int> JoinRoomAsync(string roomId, CancellationToken cancellationToken = default)
     {
         // JOIN_ROOM → čeká na JOIN_ROOM_OK nebo ERROR (GAME_START a GAME_STATE přijdou jako push).
         var parsedRoomId = TryParseRoomId(roomId);
@@ -244,6 +244,16 @@ public class GameClient : IGameClient, IAsyncDisposable
                 }
                 throw new InvalidOperationException(resp.Raw);
             }
+            var joinedCount = -1;
+            if (resp.Params.TryGetValue("players", out var playersStr))
+            {
+                var parts = playersStr.Split('/', 2);
+                if (parts.Length > 0 && int.TryParse(parts[0], out var count))
+                {
+                    joinedCount = count;
+                }
+            }
+            return joinedCount;
         }
         catch
         {

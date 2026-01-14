@@ -36,9 +36,10 @@ public interface IGameClient
 
     Task<RoomInfo> CreateRoomAsync(string name, CancellationToken cancellationToken = default);
 
-    Task JoinRoomAsync(string roomId, CancellationToken cancellationToken = default);
+    Task<int> JoinRoomAsync(string roomId, CancellationToken cancellationToken = default);
 
     Task LeaveRoomAsync(int roomId, CancellationToken cancellationToken = default);
+    void ClearRoomCache(int roomId);
 
     Task SendMoveAsync(Move move, CancellationToken cancellationToken = default);
 
