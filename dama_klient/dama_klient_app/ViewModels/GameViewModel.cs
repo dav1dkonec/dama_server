@@ -1116,7 +1116,7 @@ public class GameViewModel : ViewModelBase
                 return false;
             }
 
-            foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
+            /*foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
             {
                 if (nic.OperationalStatus != OperationalStatus.Up)
                 {
@@ -1144,11 +1144,11 @@ public class GameViewModel : ViewModelBase
                 {
                     return true;
                 }
-            }
+            }}*/
         }
         catch
         {
-            // If we cannot inspect interfaces, fall back to "available".
+            // fall-back na "available", pokud nemůžeme detekovat připojení k sítí
             return true;
         }
 

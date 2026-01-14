@@ -1519,10 +1519,14 @@ void checkTimeouts(
 
             bool anyPlayer = false;
             bool allStale = true;
+            auto freezeAt = std::chrono::steady_clock::time_point{};
             for (const auto& key : room.playerKeys) {
                 auto pit = players.find(key);
                 if (pit == players.end()) continue;
                 anyPlayer = true;
+                if (freezeAt == std::chrono::steady_clock::time_point{} || pit->second.lastSeen > freezeAt) {
+                    freezeAt = pit->second.lastSeen;
+                }
                 auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - pit->second.lastSeen).count();
                 if (elapsed <= pauseThresholdMs) {
                     allStale = false;
@@ -1531,7 +1535,11 @@ void checkTimeouts(
             }
 
             if (anyPlayer && allStale) {
-                auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - room.lastTurnAt).count();
+                auto effectiveFreezeAt = freezeAt == std::chrono::steady_clock::time_point{} ? now : freezeAt;
+                auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(effectiveFreezeAt - room.lastTurnAt).count();
+                if (elapsed < 0) {
+                    elapsed = 0;
+                }
                 room.remainingTurnMs = std::max(0, turnTimeoutMs - static_cast<int>(elapsed));
                 room.lastTurnAt = std::chrono::steady_clock::time_point{}; // freeze timer during server outage
             }
