@@ -11,6 +11,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <errno.h>
 
 #include "protocol.hpp"
 #include "models.hpp"
@@ -115,6 +116,12 @@ int main(int argc, char* argv[]) {
     if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEPORT, &reuse, sizeof(reuse)) < 0) {
         perror("setsockopt SO_REUSEPORT");
     }
+    timeval recvTimeout{};
+    recvTimeout.tv_sec = timeoutCheckIntervalMs / 1000;
+    recvTimeout.tv_usec = (timeoutCheckIntervalMs % 1000) * 1000;
+    if (setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &recvTimeout, sizeof(recvTimeout)) < 0) {
+        perror("setsockopt SO_RCVTIMEO");
+    }
 
     sockaddr_in servAddr{};
     servAddr.sin_family = AF_INET;
@@ -216,7 +223,19 @@ int main(int argc, char* argv[]) {
         ssize_t n = recvfrom(sockfd, buffer, sizeof(buffer) - 1, 0,
                              reinterpret_cast<sockaddr*>(&clientAddr), &clientLen);
         if (n < 0) {
-            perror("recvfrom");
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                auto nowTimeout = std::chrono::steady_clock::now();
+                if (std::chrono::duration_cast<std::chrono::milliseconds>(
+                        nowTimeout - lastTimeoutCheck).count() > timeoutCheckIntervalMs) {
+                    int effectiveHeartbeatMs = timeoutMs * timeoutGrace;
+                    int pauseThresholdMs = std::min(12000, effectiveHeartbeatMs);
+                    checkTimeouts(players, rooms, effectiveHeartbeatMs, pauseThresholdMs, turnTimeoutMs,
+                                  sockfd, reconnectWindowMs, endpointToToken);
+                    lastTimeoutCheck = nowTimeout;
+                }
+            } else {
+                perror("recvfrom");
+            }
             continue;
         }
 
