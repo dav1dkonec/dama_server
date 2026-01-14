@@ -1482,35 +1482,6 @@ void checkTimeouts(
 ) {
     auto now = std::chrono::steady_clock::now();
 
-    for (auto& [key, player] : players) {
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - player.lastSeen).count();
-        if (elapsed > heartbeatTimeoutMs && !player.paused) {
-            std::cout << "Player timeout: " << player.nick
-                      << " key=" << key
-                      << " addr=" << addrToKey(player.addr) << std::endl;
-            player.connected = false;
-            // mark pause window
-            player.paused = true;
-            player.resumeDeadline = now + std::chrono::milliseconds(reconnectWindowMs);
-
-            for (auto& [roomId, room] : rooms) {
-                auto it = std::find(room.playerKeys.begin(), room.playerKeys.end(), key);
-                if (it == room.playerKeys.end()) continue;
-
-                if (room.status == RoomStatus::IN_GAME) {
-                    pauseRoom(room, players, sockfd, reconnectWindowMs, turnTimeoutMs, key);
-                    std::cout << "[WARN] TIMEOUT_HEARTBEAT room=" << room.id
-                              << " key=" << key << " paused" << std::endl;
-                } else {
-                    room.playerKeys.erase(it);
-                    if (room.playerKeys.empty()) {
-                        resetRoom(room);
-                    }
-                }
-            }
-        }
-    }
-
     if (pauseThresholdMs > 0) {
         for (auto& [roomId, room] : rooms) {
             if (room.status != RoomStatus::IN_GAME) continue;
@@ -1542,6 +1513,35 @@ void checkTimeouts(
                 }
                 room.remainingTurnMs = std::max(0, turnTimeoutMs - static_cast<int>(elapsed));
                 room.lastTurnAt = std::chrono::steady_clock::time_point{}; // freeze timer during server outage
+            }
+        }
+    }
+
+    for (auto& [key, player] : players) {
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - player.lastSeen).count();
+        if (elapsed > heartbeatTimeoutMs && !player.paused) {
+            std::cout << "Player timeout: " << player.nick
+                      << " key=" << key
+                      << " addr=" << addrToKey(player.addr) << std::endl;
+            player.connected = false;
+            // mark pause window
+            player.paused = true;
+            player.resumeDeadline = now + std::chrono::milliseconds(reconnectWindowMs);
+
+            for (auto& [roomId, room] : rooms) {
+                auto it = std::find(room.playerKeys.begin(), room.playerKeys.end(), key);
+                if (it == room.playerKeys.end()) continue;
+
+                if (room.status == RoomStatus::IN_GAME) {
+                    pauseRoom(room, players, sockfd, reconnectWindowMs, turnTimeoutMs, key);
+                    std::cout << "[WARN] TIMEOUT_HEARTBEAT room=" << room.id
+                              << " key=" << key << " paused" << std::endl;
+                } else {
+                    room.playerKeys.erase(it);
+                    if (room.playerKeys.empty()) {
+                        resetRoom(room);
+                    }
+                }
             }
         }
     }
