@@ -27,7 +27,7 @@ int main(int argc, char* argv[]) {
     const int timeoutCheckIntervalMs = 500;
     int reconnectWindowMs = 60000;
 
-    // jednoduché zpracování argumentů --players X --rooms Y --host IP --port port --timeout-ms --tunr-timeout-ms --timeout-grace
+    // jednoduché zpracování argumentů --players X --rooms Y --host IP --port port --timeout-ms --turn-timeout-ms --timeout-grace
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--players" && i + 1 < argc) {
@@ -243,7 +243,7 @@ int main(int argc, char* argv[]) {
         std::string line(buffer);
         rtrim(line);
 
-        if (line.size() > 1024) {
+        if (line.size() > 256) {
             std::string resp = "0;ERROR;INVALID_FORMAT;Message too long\n";
             sendto(sockfd, resp.c_str(), resp.size(), 0,
                    reinterpret_cast<sockaddr*>(&clientAddr), clientLen);

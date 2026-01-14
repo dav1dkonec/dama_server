@@ -29,7 +29,7 @@ public class GameClient : IGameClient, IAsyncDisposable
     private readonly TimeSpan _serverOfflineThreshold = TimeSpan.FromSeconds(12);
 
     // UDP socket a tabulka rozpracovaných požadavků (dle ID).
-    private readonly UdpClient _udpClient;
+    private UdpClient _udpClient;
     private readonly ConcurrentDictionary<int, PendingRequest> _pending = new();
     private readonly ConcurrentDictionary<int, GameStartInfo> _lastGameStarts = new();
     private readonly ConcurrentDictionary<int, GameStateInfo> _lastGameStates = new();
@@ -56,6 +56,9 @@ public class GameClient : IGameClient, IAsyncDisposable
     private int? _activeRoomId;
     private DateTimeOffset _phaseChangedAt = DateTimeOffset.UtcNow;
     private ServerStatus _serverStatus = ServerStatus.Unknown;
+    private bool _sessionActive;
+    private string _connectedHost = string.Empty;
+    private int _connectedPort;
 
     public GameClient(string host = "127.0.0.1", int port = 5000)
     {
@@ -98,17 +101,22 @@ public class GameClient : IGameClient, IAsyncDisposable
         // Naváže socket a spustí přijímací/heartbeat smyčky.
         lock (_connectLock)
         {
-            if (_isConnected)
+            var endpointChanged = !string.Equals(_connectedHost, _host, StringComparison.Ordinal) ||
+                                  _connectedPort != _port;
+            if (!_isConnected || endpointChanged)
             {
-                return;
+                RebindSocket();
             }
 
-            _udpClient.Connect(_host, _port);
             _isConnected = true;
-            _lastReceiveAt = DateTimeOffset.UtcNow;
-            _disconnectNotified = 0;
-            _receiveLoopTask = Task.Run(() => ReceiveLoopAsync(_cts.Token));
-            _heartbeatTask = Task.Run(() => HeartbeatLoopAsync(_cts.Token));
+            if (_receiveLoopTask == null || _receiveLoopTask.IsCompleted || endpointChanged)
+            {
+                _receiveLoopTask = Task.Run(() => ReceiveLoopAsync(_cts.Token, _udpClient));
+            }
+            if (_heartbeatTask == null || _heartbeatTask.IsCompleted)
+            {
+                _heartbeatTask = Task.Run(() => HeartbeatLoopAsync(_cts.Token));
+            }
         }
 
         await Task.CompletedTask;
@@ -173,6 +181,28 @@ public class GameClient : IGameClient, IAsyncDisposable
             ClearSessionCaches();
             _token = tkn;
             SetPhase(ClientPhase.Lobby);
+            _sessionActive = true;
+        }
+    }
+
+    public async Task<bool> ProbeServerAsync(CancellationToken cancellationToken = default)
+    {
+        var id = NextId();
+        var pending = new PendingRequest(RequestKind.Single, new[] { "PONG", "ERROR" });
+        _pending[id] = pending;
+        try
+        {
+            await SendAsync($"{id};PING\n", cancellationToken);
+            var resp = await AwaitResponseAsync(id, pending, cancellationToken);
+            return resp.Type == "PONG";
+        }
+        catch
+        {
+            return false;
+        }
+        finally
+        {
+            _pending.TryRemove(id, out _);
         }
     }
 
@@ -190,6 +220,7 @@ public class GameClient : IGameClient, IAsyncDisposable
         _token = string.Empty;
         ClearSessionCaches();
         SetPhase(ClientPhase.LoggedOut);
+        _sessionActive = false;
     }
 
     public async Task<IReadOnlyList<RoomInfo>> GetRoomsAsync(CancellationToken cancellationToken = default)
@@ -348,6 +379,25 @@ public class GameClient : IGameClient, IAsyncDisposable
 
     private int NextId() => Interlocked.Increment(ref _nextId);
 
+    private void RebindSocket()
+    {
+        var old = _udpClient;
+        _udpClient = new UdpClient();
+        _udpClient.Connect(_host, _port);
+        _connectedHost = _host;
+        _connectedPort = _port;
+        _lastReceiveAt = DateTimeOffset.UtcNow;
+        Interlocked.Exchange(ref _disconnectNotified, 0);
+        try
+        {
+            old.Dispose();
+        }
+        catch
+        {
+            // best effort
+        }
+    }
+
     private async Task SendAsync(string payload, CancellationToken cancellationToken)
     {
         var buffer = Encoding.UTF8.GetBytes(payload);
@@ -355,21 +405,34 @@ public class GameClient : IGameClient, IAsyncDisposable
         AppServices.Logger.Info($"TX: {payload.Trim()}");
     }
 
-    private async Task ReceiveLoopAsync(CancellationToken cancellationToken)
+    private async Task ReceiveLoopAsync(CancellationToken cancellationToken, UdpClient udpClient)
     {
         // Nekonečná smyčka na příjem datagramů, parsuje zprávy a buď je přiřadí pending žádosti (dle ID), nebo zavolá push eventy.
         while (!cancellationToken.IsCancellationRequested)
         {
+            if (!ReferenceEquals(udpClient, _udpClient))
+            {
+                break;
+            }
             UdpReceiveResult result;
             try
             {
-                result = await _udpClient.ReceiveAsync(cancellationToken);
+                result = await udpClient.ReceiveAsync(cancellationToken);
             }
             catch (OperationCanceledException)
             {
                 break;
             }
-            catch (SocketException ex) when (ex.SocketErrorCode == SocketError.ConnectionReset)
+            catch (ObjectDisposedException)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    break;
+                }
+                continue;
+            }
+            catch (SocketException ex) when (ex.SocketErrorCode == SocketError.ConnectionReset ||
+                                             ex.SocketErrorCode == SocketError.ConnectionRefused)
             {
                 // Ignore ICMP port unreachable when server isn't up yet.
                 NotifyDisconnected();
@@ -540,6 +603,7 @@ public class GameClient : IGameClient, IAsyncDisposable
                     _token = string.Empty;
                     ClearSessionCaches();
                     SetPhase(ClientPhase.LoggedOut);
+                    _sessionActive = false;
                     TokenInvalidated?.Invoke(this, EventArgs.Empty);
                 }
                 break;
@@ -577,6 +641,10 @@ public class GameClient : IGameClient, IAsyncDisposable
                 if (elapsed > _disconnectThreshold)
                 {
                     NotifyDisconnected();
+                }
+                if (!_sessionActive)
+                {
+                    continue;
                 }
                 var id = NextId();
                 await SendAsync($"{id};PING\n", cancellationToken);

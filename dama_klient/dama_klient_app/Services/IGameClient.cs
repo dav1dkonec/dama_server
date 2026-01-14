@@ -31,6 +31,7 @@ public interface IGameClient
     Task ConnectAsync(CancellationToken cancellationToken = default);
 
     Task LoginAsync(string nickname, CancellationToken cancellationToken = default);
+    Task<bool> ProbeServerAsync(CancellationToken cancellationToken = default);
 
     Task<IReadOnlyList<RoomInfo>> GetRoomsAsync(CancellationToken cancellationToken = default);
 

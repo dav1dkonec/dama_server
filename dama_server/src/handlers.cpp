@@ -473,6 +473,33 @@ void handleLogin(
         return;
     }
 
+    auto itExisting = endpointToToken.find(clientKey);
+    if (itExisting != endpointToToken.end()) {
+        auto pit = players.find(itExisting->second);
+        if (pit != players.end()) {
+            const Player& existing = pit->second;
+            if (!existing.nick.empty() && existing.nick != nick) {
+                std::string resp = std::to_string(msg.id) +
+                                   ";ERROR;ALREADY_LOGGED_IN\n";
+                sendto(sockfd, resp.c_str(), resp.size(), 0,
+                       reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+                std::cout << "[INFO] LOGIN rejected for " << clientKey
+                          << " (nick mismatch)" << std::endl;
+                return;
+            }
+            std::string resp = std::to_string(msg.id) +
+                               ";LOGIN_OK;player=" + std::to_string(existing.id) +
+                               ";token=" + existing.token + "\n";
+            sendto(sockfd, resp.c_str(), resp.size(), 0,
+                   reinterpret_cast<const sockaddr*>(&clientAddr), clientLen);
+            sendConfig(pit->second, sockfd, turnTimeoutMs);
+            std::cout << "[INFO] LOGIN repeat key=" << clientKey
+                      << " player=" << existing.id << std::endl;
+            return;
+        }
+        endpointToToken.erase(itExisting);
+    }
+
     if (players.size() >= static_cast<std::size_t>(limits.maxPlayers)) {
         std::string resp = std::to_string(msg.id) +
                            ";ERROR;SERVER_FULL;Vyčerpán limit hráčů\n";

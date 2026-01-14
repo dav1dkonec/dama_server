@@ -3,7 +3,8 @@
 Messages end with `\n`, format `ID;TYPE;param;key=value;...`.
 
 ## Login & heartbeat
-- `ID;LOGIN;<nick>` → `ID;LOGIN_OK;player=<playerId>` or `ERROR;INVALID_FORMAT|SERVER_FULL`.
+- `ID;LOGIN;<nick>` → `ID;LOGIN_OK;player=<playerId>` or `ERROR;INVALID_FORMAT|SERVER_FULL|ALREADY_LOGGED_IN`.
+  - If the endpoint is already logged in, `LOGIN` is idempotent; a different nick returns `ALREADY_LOGGED_IN`.
 - `ID;PING` → `ID;PONG` (send periodically to keep connection alive).
 
 ## Lobby

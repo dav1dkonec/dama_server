@@ -1,4 +1,5 @@
 using System;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Input;
 using dama_klient_app.Models;
@@ -28,6 +29,7 @@ public class LoginViewModel : ViewModelBase
     private IBrush _statusBrush = Brushes.Gray;
     private string _serverStatusText = "Server neznámý";
     private IBrush _serverStatusBrush = Brushes.Gray;
+    private CancellationTokenSource? _probeCts;
 
     public LoginViewModel(IGameClient gameClient, Action<string> onLoginCompleted, string? loginNotice)
     {
@@ -46,6 +48,7 @@ public class LoginViewModel : ViewModelBase
             ErrorMessage = loginNotice;
         }
         _ = AutoDiscoverAsync();
+        StartProbeLoop();
     }
 
     public IGameClient GameClient { get; }
@@ -173,13 +176,14 @@ public class LoginViewModel : ViewModelBase
             AppServices.Logger.Info($"Login OK as '{trimmed}'");
             if (_onLoginAsync != null)
             {
+                StopProbeLoop();
                 GameClient.ServerStatusChanged -= OnServerStatusChanged;
                 await _onLoginAsync(trimmed);
             }
         }
         catch (Exception ex)
         {
-            ErrorMessage = ex.Message;
+            ErrorMessage = FormatLoginError(ex.Message);
             AppServices.Logger.Error($"Login failed: {ex.Message}");
         }
         finally
@@ -268,5 +272,64 @@ public class LoginViewModel : ViewModelBase
     {
         StatusMessage = message;
         StatusBrush = brush;
+    }
+
+    private static string FormatLoginError(string message)
+    {
+        if (message.Contains("SERVER_FULL", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Server full";
+        }
+
+        return message;
+    }
+
+    private void StartProbeLoop()
+    {
+        if (_probeCts != null)
+        {
+            return;
+        }
+
+        _probeCts = new CancellationTokenSource();
+        var token = _probeCts.Token;
+        _ = Task.Run(async () =>
+        {
+            while (!token.IsCancellationRequested)
+            {
+                if (!IsBusy && !IsDiscovering)
+                {
+                    try
+                    {
+                        GameClient.ConfigureEndpoint(Host, Port);
+                        await GameClient.ConnectAsync(token);
+                        await GameClient.ProbeServerAsync(token);
+                    }
+                    catch
+                    {
+                        // best effort
+                    }
+                }
+
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(5), token);
+                }
+                catch (TaskCanceledException)
+                {
+                    return;
+                }
+            }
+        }, token);
+    }
+
+    private void StopProbeLoop()
+    {
+        if (_probeCts == null)
+        {
+            return;
+        }
+        _probeCts.Cancel();
+        _probeCts = null;
     }
 }
