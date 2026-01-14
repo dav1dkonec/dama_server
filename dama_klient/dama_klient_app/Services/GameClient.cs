@@ -635,6 +635,7 @@ public class GameClient : IGameClient, IAsyncDisposable
         else if (phase == ClientPhase.LoggedOut || phase == ClientPhase.Lobby)
         {
             _activeRoomId = null;
+            ClearSessionCaches();
         }
     }
 
