@@ -102,14 +102,17 @@ public class GameViewModel : ViewModelBase
             _boardBuilt = true;
         });
 
-        // If GAME_START/STATE already arrived before we subscribed, replay them.
-        if (GameClient.TryGetLastGameStart(_roomId, out var cachedStart))
+        // If GAME_START/STATE already arrived before we subscribed, replay them only for active games.
+        if (room.PlayerCount >= 2)
         {
-            OnGameStarted(this, cachedStart);
-        }
-        if (GameClient.TryGetLastGameState(_roomId, out var cachedState))
-        {
-            OnGameStateUpdated(this, cachedState);
+            if (GameClient.TryGetLastGameStart(_roomId, out var cachedStart))
+            {
+                OnGameStarted(this, cachedStart);
+            }
+            if (GameClient.TryGetLastGameState(_roomId, out var cachedState))
+            {
+                OnGameStateUpdated(this, cachedState);
+            }
         }
     }
 
