@@ -239,6 +239,30 @@ int main(int argc, char* argv[]) {
             continue;
         }
 
+        bool hasBinary = false;
+        for (ssize_t i = 0; i < n; ++i) {
+            unsigned char ch = static_cast<unsigned char>(buffer[i]);
+            if (ch == 0x09 || ch == 0x0A || ch == 0x0D) {
+                continue;
+            }
+            if (ch < 0x20 || ch == 0x7F) {
+                hasBinary = true;
+                break;
+            }
+        }
+        if (hasBinary) {
+            std::cerr << "Invalid binary data from " << addrToKey(clientAddr) << std::endl;
+            std::string invalidKey = addrToKey(clientAddr);
+            auto itInvalidEndpoint = endpointToToken.find(invalidKey);
+            if (itInvalidEndpoint != endpointToToken.end()) {
+                registerInvalidMessage(itInvalidEndpoint->second, players, rooms, sockfd, "BINARY_DATA");
+                std::string resp = "0;ERROR;INVALID_FORMAT;Binary data\n";
+                sendto(sockfd, resp.c_str(), resp.size(), 0,
+                       reinterpret_cast<sockaddr*>(&clientAddr), clientLen);
+            }
+            continue;
+        }
+
         buffer[n] = '\0';
         std::string line(buffer);
         rtrim(line);

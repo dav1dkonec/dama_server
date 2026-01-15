@@ -449,6 +449,12 @@ public class GameClient : IGameClient, IAsyncDisposable
             Interlocked.Exchange(ref _disconnectNotified, 0);
             UpdateServerStatus(ServerStatus.Online);
 
+            if (HasBinaryPayload(result.Buffer))
+            {
+                RegisterInvalidServerMessage("BINARY_DATA");
+                continue;
+            }
+
             var line = Encoding.UTF8.GetString(result.Buffer).TrimEnd('\n', '\r');
             AppServices.Logger.Info($"RX: {line}");
             if (string.IsNullOrWhiteSpace(line))
@@ -480,7 +486,7 @@ public class GameClient : IGameClient, IAsyncDisposable
             }
 
             var hasPending = _pending.TryGetValue(msg.Id, out var pending);
-            var isPushType = IsPushType(msg.Type);
+            var isPushType = IsPushType(msg.Type) || (msg.Type == "ERROR" && msg.Id == 0);
             var allowedForPending = hasPending && pending!.IsAllowedResponseType(msg.Type);
 
             if (!hasPending && !isPushType)
@@ -786,6 +792,23 @@ public class GameClient : IGameClient, IAsyncDisposable
     private static int? TryParseRoomId(string roomId)
     {
         return int.TryParse(roomId, out var value) ? value : null;
+    }
+
+    private static bool HasBinaryPayload(byte[] buffer)
+    {
+        for (var i = 0; i < buffer.Length; i++)
+        {
+            var b = buffer[i];
+            if (b == 0x09 || b == 0x0A || b == 0x0D)
+            {
+                continue;
+            }
+            if (b < 0x20 || b == 0x7F)
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static bool TryParseCoords(string value, out int row, out int col)
